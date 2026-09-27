@@ -170,9 +170,9 @@ uv run --env-file .env python -m radar import-tags detail-request.json detail-re
 
 ## 검증
 
-로컬에서 단위·배포 계약 검사 12개(Parquet 왕복·namespace·정적 PV 연결·Argo CD 수동 정책 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
+로컬에서 단위·배포 계약 검사 13개(Parquet 왕복·namespace·정적 PV 연결·Argo CD 수동 정책·전용 터널 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
 
-사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개, 조회 전용 계정으로 웹 `/api/ready`의 `ready=true`**, GHCR 이미지 2개 `v0.1.0` 업로드 성공 및 raw PV/PVC의 `Bound` 상태를 확인했습니다. 이 결과는 실제 Kubernetes 이미지 다운로드·볼륨 파일 쓰기·순위/이력 화면 전체 검증·대량 적재 성능 검증을 의미하지 않습니다. 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다.
+사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개**, GHCR 이미지 2개 `v0.1.0` 업로드 성공 및 raw PV/PVC의 `Bound` 상태를 확인했습니다. 이후 Kubernetes 초기화 Job의 `schema_ready`, 웹 Pod `1/1 Running`, ClusterIP의 `/api/ready` 응답 `ready=true`와 `/` HTTP 200도 확인했습니다. 웹은 최초 비밀번호 인증 오류 후 Secret 재입력·재시작 절차를 거쳐 준비 상태 검사를 통과했습니다. 터널 외부 접속·볼륨 파일 쓰기·순위/이력 화면 전체 검증·대량 적재 성능 검증 및 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다.
 
 ```sh
 uv run python -m unittest discover -s tests -v
@@ -194,7 +194,7 @@ RADAR_TEST_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/radar_test' \
 
 **이 절의 명령은 서버에서 사용자가 실행할 절차입니다. 코드 업로드만으로 배포되지는 않습니다.** Application은 기존 Argo CD의 `argocd` namespace에 등록하고 앱 리소스는 `radar` namespace에 둡니다. 자동 동기화·자동 삭제·self-heal·이미지 자동 갱신은 설정하지 않았습니다. GitHub Actions와 실제 수집 CronJob도 아직 없습니다. JSON은 Kubernetes가 기본 지원하는 manifest 형식입니다.
 
-**첫 Sync 전 준비:** GHCR 이미지와 pull 권한, DB·조회 권한, `radar` namespace의 Secret, 아래 raw 디렉터리 준비가 모두 필요합니다. StorageClass 없이 `ronny` 노드의 `/mnt/data/ronny-project/radar-data`를 사용하는 정적 local PV로 설정했습니다. 실제 서버의 PV/PVC 연결과 Pod 파일 쓰기는 아직 검증하지 않았습니다. 예전 `radar-project` namespace에 리소스를 이미 배포했다면 이름 변경은 데이터 이전이 아니므로 별도 이전 계획 없이 기존 namespace/PVC를 삭제하지 않습니다.
+**첫 Sync 전 준비:** GHCR 이미지와 pull 권한, DB·조회 권한, `radar` namespace의 DB·GHCR Secret, 6절의 전용 터널 Secret `radar-tunnel`, 아래 raw 디렉터리 준비가 모두 필요합니다. StorageClass 없이 `ronny` 노드의 `/mnt/data/ronny-project/radar-data`를 사용하는 정적 local PV로 설정했습니다. 사용자 출력에서 PV/PVC `Bound`를 확인했지만 실제 Pod 파일 쓰기는 아직 검증하지 않았습니다. 예전 `radar-project` namespace에 리소스를 이미 배포했다면 이름 변경은 데이터 이전이 아니므로 별도 이전 계획 없이 기존 namespace/PVC를 삭제하지 않습니다.
 
 ### 1. 서버에서 코드 받기와 사전 확인
 
@@ -339,11 +339,61 @@ kubectl -n radar port-forward service/radar-web 3000:80
 
 이후 배포 변경은 Git에 반영하고 수동 Sync로 적용합니다. 정상 운영에서 같은 웹 리소스를 Argo CD와 `kubectl apply -k k8s`로 번갈아 수정하지 않습니다. 등록한 Application 자체는 별도 bootstrap 파일이므로 해당 파일 변경은 다시 apply해야 합니다.
 
-port-forward를 실행한 컴퓨터의 `http://127.0.0.1:3000`에서 확인합니다. 원격 Ubuntu에서 실행했다면 Mac/모바일의 localhost가 아닙니다. 원격 확인에는 SSH 포워딩이나 기존 접속 경로가 추가로 필요합니다. 이 초안은 ClusterIP까지만 제공하며 Ingress·도메인·HTTPS·외부 공개 경로는 아직 만들지 않았습니다.
+port-forward를 실행한 컴퓨터의 `http://127.0.0.1:3000`에서 확인합니다. 원격 Ubuntu에서 실행했다면 Mac/모바일의 localhost가 아닙니다. 공개 접속은 아래 전용 Cloudflare Tunnel을 사용하며 웹 Service는 ClusterIP로 유지합니다.
 
 `/api/ready`는 DB·조회 테이블 접근 실패 시 503을 반환합니다. DB 장애는 readiness만 실패시키며 liveness는 웹 프로세스 응답 여부를 따로 확인합니다. 아직 자료가 없는 빈 DB도 스키마와 권한이 정상이면 ready입니다.
 
-### 6. 샘플 검증과 파이프라인 실행
+### 6. Radar 전용 Cloudflare Tunnel
+
+공개 주소는 **https://radar.selfronny.com**입니다. `k8s/cloudflared.json`은 namespace `radar`에 `radar-cloudflared` Deployment를 추가합니다. 기존 공개용 터널과 내부 WARP·로드밸런서는 변경하지 않습니다. 새 터널은 원격 관리 방식이며, **Kubernetes 실행 설정은 Git/Argo CD, 호스트명→서비스 경로는 Cloudflare 대시보드, 토큰은 Kubernetes Secret**에서 관리합니다.
+
+1. Cloudflare 대시보드의 **Networking → Tunnels → Create a tunnel**에서 `radar` 전용 Cloudflared 터널을 만듭니다. 같은 이름이 이미 있으면 기존 용도를 확인하고 임의로 수정하지 않습니다. 기존 터널 토큰을 재사용하면 별도 터널이 아니라 기존 터널의 추가 connector가 되므로 새 터널의 토큰을 사용합니다.
+2. 설치 안내에서 Docker를 선택하고 **토큰 문자열만 복사**합니다. 표시된 Docker 실행/서비스 설치 명령은 실행하지 않습니다. 실제 실행은 Kubernetes가 담당합니다. 토큰은 채팅·Git에 넣지 않습니다.
+3. Ubuntu에서 아래 Secret을 만든 뒤 Argo CD를 Sync합니다. 아직 Secret이 없다면 Sync를 먼저 하지 않습니다. `read`는 Bash 숨김 입력이며 토큰에 줄바꿈을 붙이지 않습니다. 기존 Secret은 덮어쓰지 않습니다.
+
+```bash
+(
+  set +x
+  set -euo pipefail
+  IFS= read -r -s -p 'Radar tunnel token: ' RADAR_TUNNEL_TOKEN
+  printf '\n'
+  [ -n "$RADAR_TUNNEL_TOKEN" ] || exit 1
+  printf '%s' "$RADAR_TUNNEL_TOKEN" |
+    kubectl -n radar create secret generic radar-tunnel --from-file=token=/dev/stdin
+  unset RADAR_TUNNEL_TOKEN
+)
+kubectl -n radar get secret radar-tunnel
+```
+
+4. 기존 Argo CD `radar` 앱을 Refresh하고 Diff를 확인한 뒤 **수동 Sync**합니다. Prune·Force·Auto-Sync는 켜지 않습니다. 터널은 Pod 1개이며 롤링 업데이트 중에는 일시적으로 2개가 될 수 있습니다. 단일 노드/단일 replica 구성은 무중단·고가용성을 보장하지 않습니다. 초기 자원값은 request 50m/64Mi, limit 500m/256Mi입니다.
+5. 아래 상태를 확인합니다. `/ready`는 Cloudflare 연결을 검사하고, liveness는 로컬 metrics TCP만 검사하여 외부망 장애 때 재시작을 반복하지 않게 했습니다. Cloudflare로 나가는 연결과 클러스터 DNS·웹 서비스 접근이 가능해야 합니다.
+
+```bash
+kubectl -n radar rollout status deployment/radar-cloudflared --timeout=180s
+kubectl -n radar get pods -l app=radar-cloudflared
+kubectl -n radar logs deployment/radar-cloudflared --tail=50
+```
+
+6. 새 터널의 **Routes → Add route → Published application**에서 아래 경로를 추가합니다. 화면에 `Public Hostname`으로 표시되는 경우 같은 공개 호스트명 설정을 사용합니다. 이미 `radar.selfronny.com` DNS/경로가 있으면 용도를 확인하기 전에는 덮어쓰지 않습니다.
+
+| 항목 | 값 |
+|---|---|
+| Subdomain | `radar` |
+| Domain | `selfronny.com` |
+| Path | 비움 |
+| Service type | `HTTP` |
+| Service URL | `radar-web.radar.svc.cluster.local:80` |
+
+전체 원본 URL은 `http://radar-web.radar.svc.cluster.local:80`입니다. 방문자는 HTTPS를 사용하며 공개 주소 자체를 원본 URL에 넣지 않습니다. 이 터널에 DB·metrics 주소나 사설망 경로를 추가하지 않습니다. 별도 LoadBalancer/NodePort/Ingress와 공유기 인바운드 포트 개방은 필요하지 않습니다. 공개 웹이므로 방문자의 WARP 연결이나 Access 로그인을 요구하도록 새 정책을 만들지 않습니다. 기존 와일드카드 Access 정책이 적용되는 경우 확인하되 다른 서비스 정책을 일괄 해제하지 않습니다.
+
+7. 외부망 브라우저에서 화면을 확인하고 아래 응답도 확인합니다. 토큰 변경 시 Secret 갱신 후 터널 Pod를 재시작해야 합니다. 철회할 때는 해당 공개 경로를 먼저 비활성화하고 Git에서 터널 배포 제외 여부를 결정하며 기존 터널은 건드리지 않습니다.
+
+```bash
+curl --fail-with-body --max-time 15 https://radar.selfronny.com/api/ready
+curl -sS --max-time 15 -o /dev/null -w 'Dashboard HTTP %{http_code}\n' https://radar.selfronny.com/
+```
+
+### 7. 샘플 검증과 파이프라인 실행
 
 샘플은 운영 DB가 아니라 별도 개발 DB에서 확인합니다. `pipeline-job.json`을 Git 제외 경로인 `k8s/local/`에 복사해 Secret 참조를 개발 DB 것으로 바꾸고 `args`를 `["demo"]`로 바꾸면 같은 Job 실행 절차로 샘플 적재를 검증할 수 있습니다. 실제 파일 적재는 PVC에 입력 파일을 준비한 뒤 `["ingest", "/data/input/snapshot.json"]`을 사용합니다. Job 입력 파일 배달과 실제 API 수집기는 아직 자동화하지 않았습니다.
 
@@ -354,10 +404,10 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 1. 공식 API 표본에 맞춘 Cloudflare 수집 adapter 및 원본 기간·파일 완결성 검증
 2. Gemini 실제 호출 adapter, 공통 일일 예산·재시도·작업 선점·초기 모집단 관리
 3. 지속 실행 스케줄, 장애 알림, DB 백업과 복구 확인
-4. 전용 DB 읽기 계정 실제 설정, HTTPS·공개 경로·접근 정책, 장비 기준 부하 검사
+4. 전용 터널 토큰 등록·공개 경로 실제 연결, 외부 HTTPS·화면 확인, 장비 기준 부하 검사
 5. 사후 수정·과거 백필 시 영향받는 mart 재계산, 필요하면 별도 migration 체계
 
-로컬 npm dev/start는 localhost에만 바인딩하고 컨테이너에서는 Pod 네트워크를 위해 0.0.0.0으로 실행합니다. 외부 공개 시에는 HTTPS reverse proxy/Ingress 뒤에서 실행하세요. API 키·DB 비밀번호를 `NEXT_PUBLIC_*` 변수나 Git에 넣지 않습니다. `.env`와 data, node_modules, 가상환경은 `.gitignore`로 제외되고 Docker 빌드에서도 비밀정보를 제외합니다. Ubuntu의 일시적인 Docker 테스트 실행과 Kubernetes 운영 배포는 별개이며, 후자는 아직 확인하지 않았습니다.
+로컬 npm dev/start는 localhost에만 바인딩하고 컨테이너에서는 Pod 네트워크를 위해 0.0.0.0으로 실행합니다. 공개 접속은 전용 Cloudflare Tunnel의 HTTPS 주소를 사용합니다. API 키·DB 비밀번호를 `NEXT_PUBLIC_*` 변수나 Git에 넣지 않습니다. `.env`와 data, node_modules, 가상환경은 `.gitignore`로 제외되고 Docker 빌드에서도 비밀정보를 제외합니다. Kubernetes 내부 웹 배포는 확인했고 전용 터널 연결은 아직 검증 전입니다.
 
 ## 출처
 
@@ -373,5 +423,7 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 - [Argo CD Application 명세](https://argo-cd.readthedocs.io/en/stable/user-guide/application-specification/)
 - [Argo CD 자동 동기화 정책](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)
 - [Argo CD 리소스별 동기화·삭제 옵션](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/)
+- [Cloudflare Tunnel Kubernetes 배포](https://developers.cloudflare.com/tunnel/guides/kubernetes/)
+- [cloudflared 릴리스](https://github.com/cloudflare/cloudflared/releases)
 
 Cloudflare 데이터를 공개할 때는 해당 데이터 이용 조건과 출처 표시를 유지해야 합니다. 저장소에는 제3자 원본 데이터나 실제 API 응답을 포함하지 않습니다.

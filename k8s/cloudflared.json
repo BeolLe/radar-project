@@ -1,0 +1,38 @@
+{
+  "apiVersion": "apps/v1",
+  "kind": "Deployment",
+  "metadata": {"name": "radar-cloudflared", "namespace": "radar"},
+  "spec": {
+    "replicas": 1,
+    "strategy": {"type": "RollingUpdate", "rollingUpdate": {"maxSurge": 1, "maxUnavailable": 0}},
+    "selector": {"matchLabels": {"app": "radar-cloudflared"}},
+    "template": {
+      "metadata": {"labels": {"app": "radar-cloudflared"}},
+      "spec": {
+        "automountServiceAccountToken": false,
+        "securityContext": {
+          "runAsNonRoot": true, "runAsUser": 65532, "runAsGroup": 65532,
+          "seccompProfile": {"type": "RuntimeDefault"}
+        },
+        "containers": [{
+          "name": "cloudflared",
+          "image": "cloudflare/cloudflared:2026.9.3",
+          "imagePullPolicy": "IfNotPresent",
+          "args": ["tunnel", "--no-autoupdate", "--loglevel", "info", "--metrics", "0.0.0.0:2000", "run"],
+          "env": [{"name": "TUNNEL_TOKEN", "valueFrom": {"secretKeyRef": {
+            "name": "radar-tunnel", "key": "token"
+          }}}],
+          "ports": [{"name": "metrics", "containerPort": 2000}],
+          "resources": {"requests": {"cpu": "50m", "memory": "64Mi"},
+            "limits": {"cpu": "500m", "memory": "256Mi"}},
+          "securityContext": {"allowPrivilegeEscalation": false,
+            "readOnlyRootFilesystem": true, "capabilities": {"drop": ["ALL"]}},
+          "startupProbe": {"tcpSocket": {"port": "metrics"}, "periodSeconds": 2, "failureThreshold": 30},
+          "livenessProbe": {"tcpSocket": {"port": "metrics"}, "periodSeconds": 15},
+          "readinessProbe": {"httpGet": {"path": "/ready", "port": "metrics"},
+            "timeoutSeconds": 2, "periodSeconds": 10}
+        }]
+      }
+    }
+  }
+}

@@ -5,4 +5,5 @@ resources:
   - pv.json
   - storage.json
   - web.json
+  - cloudflared.json
 # Jobs are intentionally separate: applying the web must not run database writes.

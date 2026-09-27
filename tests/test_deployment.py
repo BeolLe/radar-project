@@ -77,6 +77,28 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("argocd", resources)
         self.assertNotIn("pipeline-job.json", resources)
 
+    def test_dedicated_tunnel_contract(self):
+        tunnel = json.loads((ROOT / "k8s/cloudflared.json").read_text())
+        self.assertEqual(tunnel["metadata"], {"name": "radar-cloudflared", "namespace": "radar"})
+        self.assertEqual(tunnel["spec"]["replicas"], 1)
+        self.assertEqual(tunnel["spec"]["selector"]["matchLabels"],
+                         tunnel["spec"]["template"]["metadata"]["labels"])
+        pod = tunnel["spec"]["template"]["spec"]
+        self.assertFalse(pod["automountServiceAccountToken"])
+        self.assertTrue(pod["securityContext"]["runAsNonRoot"])
+        self.assertNotIn("volumes", pod)
+        container = pod["containers"][0]
+        self.assertEqual(container["image"], "cloudflare/cloudflared:2026.9.3")
+        self.assertEqual(container["args"], ["tunnel", "--no-autoupdate", "--loglevel", "info",
+                                             "--metrics", "0.0.0.0:2000", "run"])
+        self.assertEqual(container["env"], [{"name": "TUNNEL_TOKEN", "valueFrom": {
+            "secretKeyRef": {"name": "radar-tunnel", "key": "token"},
+        }}])
+        self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])
+        self.assertEqual(container["readinessProbe"]["httpGet"], {"path": "/ready", "port": "metrics"})
+        self.assertEqual(container["livenessProbe"]["tcpSocket"], {"port": "metrics"})
+        self.assertIn("  - cloudflared.json", (ROOT / "k8s/kustomization.yaml").read_text())
+
     def test_build_context_excludes_secrets(self):
         excluded = (ROOT / ".dockerignore").read_text().splitlines()
         for entry in (".git", "**/.env*", "secrets", "data", "**/node_modules", "k8s/local"):

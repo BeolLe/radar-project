@@ -4,6 +4,7 @@ import ipaddress
 import re
 
 BUCKETS = (100_000, 200_000, 500_000, 1_000_000)
+FULL_BUCKETS = (200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, *BUCKETS)
 
 
 def domain_name(value: str) -> str:
@@ -39,8 +40,8 @@ def validate_snapshot(payload: dict) -> tuple[dict, list[dict], dict[str, int]]:
     sources = payload.get("sources")
     if not isinstance(sources, list) or not sources:
         raise ValueError("sources must not be empty")
-    if kind == "weekly" and sorted(s.get("bucket", 0) for s in sources) != list(BUCKETS):
-        raise ValueError(f"Expected exactly these four bucket sources: {BUCKETS}")
+    if kind == "weekly" and tuple(sorted(s.get("bucket", 0) for s in sources)) not in (BUCKETS, FULL_BUCKETS):
+        raise ValueError("Expected the legacy four or all twelve weekly bucket sources")
     if kind == "daily" and len(sources) != 1:
         raise ValueError("One POPULAR daily list per snapshot")
     rows, values, sets, ids = [], {}, [], set()

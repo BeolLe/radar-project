@@ -1,12 +1,51 @@
 """Local deployment contract checks; these do not claim a live cluster test."""
 import json
 from pathlib import Path
+import runpy
+import sys
+from types import ModuleType
 import unittest
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_airflow_namespace_permissions_and_dag_contract(self):
+        role, binding = json.loads((ROOT / "k8s/airflow-rbac.json").read_text())["items"]
+        self.assertEqual(role["metadata"], {"name": "radar-airflow", "namespace": "radar"})
+        self.assertEqual(binding["subjects"], [{"kind": "ServiceAccount", "name": "airflow-worker", "namespace": "pipeline"}])
+        self.assertEqual(binding["roleRef"]["kind"], "Role")
+        self.assertEqual(binding["roleRef"]["name"], role["metadata"]["name"])
+        resources = {resource for rule in role["rules"] for resource in rule["resources"]}
+        self.assertEqual(resources, {"pods", "pods/log", "events"})
+        self.assertIn("  - airflow-rbac.json", (ROOT / "k8s/kustomization.yaml").read_text())
+        # Configuration contract only; actual provider import remains a cluster deployment gate.
+        airflow = ModuleType("airflow")
+        airflow.DAG = MagicMock()
+        pod = ModuleType("airflow.providers.cncf.kubernetes.operators.pod")
+        pod.KubernetesPodOperator = MagicMock()
+        with patch.dict(sys.modules, {"airflow": airflow, pod.__name__: pod}):
+            runpy.run_path(str(ROOT / "airflow/radar_collection.py"))
+        self.assertEqual(airflow.DAG.call_count, 2)
+        for call in airflow.DAG.call_args_list:
+            self.assertFalse(call.kwargs["catchup"])
+            self.assertTrue(call.kwargs["is_paused_upon_creation"])
+            self.assertEqual(call.kwargs["max_active_runs"], 1)
+        self.assertEqual([call.kwargs["schedule"] for call in airflow.DAG.call_args_list], ["0 4 * * *", "0 5 * * 2"])
+        for call in pod.KubernetesPodOperator.call_args_list:
+            config = call.kwargs
+            self.assertEqual(config["namespace"], "radar")
+            self.assertEqual(config["pool"], "radar_collection")
+            self.assertFalse(config["deferrable"])
+            self.assertFalse(config["do_xcom_push"])
+            self.assertEqual(config["image"], "ghcr.io/beolle/radar-project-pipeline:v0.3.0")
+            spec = config["pod_template_dict"]["spec"]
+            self.assertFalse(spec["automountServiceAccountToken"])
+            self.assertEqual(spec["imagePullSecrets"], [{"name": "radar-ghcr"}])
+            self.assertEqual(spec["containers"][0]["resources"]["limits"]["memory"], "4Gi")
+            self.assertIn("dag_run.start_date", config["arguments"][-1])
+
     def test_workload_contract(self):
         web, service = json.loads((ROOT / "k8s/web.json").read_text())["items"]
         job = json.loads((ROOT / "k8s/pipeline-job.json").read_text())

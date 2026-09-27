@@ -2,7 +2,7 @@
 
 Cloudflare Radar 도메인 순위 이력을 누적하고, 변화 신호와 Gemini 태그를 조회하는 **개인 서버용 프로젝트 초안**입니다.
 
-**현재 상태:** 파일 기반 적재·변화 계산·태그 요청 준비/결과 검증·Next.js 조회와 Cloudflare 일간 POPULAR Top 100 수집 명령을 구현했습니다. Kubernetes 웹 배포와 공개 HTTPS 응답은 사용자 로그에서 확인했습니다. 새 일간 수집기는 합성 응답으로 검증했으며 계정의 실제 API 호출·적재는 아직 실행 전입니다. 주간 대량 수집기·전체 국가 탐색·Gemini 호출·자동 스케줄은 후속 작업입니다.
+**현재 상태:** 파일 기반 적재·변화 계산·태그 요청 준비/결과 검증·Next.js 조회를 구현했습니다. Kubernetes 웹·공개 HTTPS와 2026-09-27 WORLD/KR 각 100건 실수집·적재·화면은 사용자 결과로 확인했습니다. 전체 지역 일간 수집, 글로벌 주간 12개 bucket 수집과 Airflow DAG를 추가했습니다. 새 전체 수집 경로는 로컬 합성 테스트 대상이며 **서버 이미지 빌드·DAG 배포·첫 실행은 별도 확인이 필요**합니다. Gemini API 호출 worker는 아직 없습니다.
 
 ## 구성
 
@@ -26,7 +26,8 @@ raw 파일은 Git에서 제외합니다. PostgreSQL을 브라우저에 직접 �
 ## 파일
 
 ```text
-radar/                  Python CLI, Cloudflare 일간 수집, 입력 계약, 태깅 검증
+radar/                  Python CLI, Cloudflare 일간/주간 수집, 입력 계약, 태깅 검증
+airflow/                기존 Airflow git-sync 저장소에 배포할 독립 DAG 파일
 schema.sql              새 전용 DB용 stage/core/mart 초기 스키마
 taxonomy.json           고정 태그 코드와 한국어 표시 이름
 tests/                  단위 테스트 + 선택적 PostgreSQL 통합 테스트
@@ -84,7 +85,7 @@ DB 미연결 시 안내 화면을 보여주며 실제 자료처럼 보이는 샘
 
 ## 외부 수집기의 입력 계약
 
-이 초안의 `ingest`는 Cloudflare API 원본 응답을 바로 받지 않습니다. `collect-daily`가 일간 응답을 아래 계약으로 변환한 후 기존 `ingest`를 호출합니다. 주간 수집 adapter는 아직 없습니다. API의 `description` 주석은 사이트 소개문이 아닙니다.
+이 초안의 `ingest`는 Cloudflare API 원본 응답을 바로 받지 않습니다. 수집 명령이 응답을 아래 계약으로 변환한 후 기존 `ingest`를 호출합니다. API의 dataset `description`은 사이트 소개문이 아닙니다.
 
 일간 POPULAR 예시:
 
@@ -104,7 +105,7 @@ DB 미연결 시 안내 화면을 보여주며 실제 자료처럼 보이는 샘
 }
 ```
 
-주간 입력은 `kind=weekly`, `location=WORLD`이며 `sources`에 bucket `100000`, `200000`, `500000`, `1000000` 네 개가 있어야 합니다. 각 source의 rows에는 domain이 들어갑니다. 각 파일의 도메인 중복은 거부하고, 파일 간 누적 포함 관계를 검사한 뒤 가장 작은 bucket으로 합칩니다.
+주간 입력은 `kind=weekly`, `location=WORLD`입니다. 수집기는 `200`, `500`, `1000`, `2000`, `5000`, `10000`, `20000`, `50000`, `100000`, `200000`, `500000`, `1000000`의 12개 bucket을 모두 요구합니다. 이전 4개 bucket 입력과 raw 파일도 계속 읽습니다. 각 파일 내부 중복은 거부하고, 파일 간 누적 포함 관계를 검사한 뒤 도메인별 가장 작은 bucket으로 합칩니다. 전체 원본은 1,888,700행, 정합성 검증 후 core 관측은 1,000,000행입니다.
 
 ```sh
 uv run python -m radar demo-input > demo-input.json
@@ -170,9 +171,11 @@ uv run --env-file .env python -m radar import-tags detail-request.json detail-re
 
 ## 검증
 
-로컬에서 단위·배포 계약 검사 22개(Parquet 왕복·namespace·정적 PV 연결·Argo CD 수동 정책·전용 터널·일간 API 계약/실패 처리 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
+로컬 단위·배포 계약 검사에는 Parquet 왕복/이전 해시 호환, namespace·PV·Argo CD 정책, 일간/주간 API 계약과 부분 실패 처리, Airflow DAG 설정·RBAC 범위가 포함됩니다. DAG 설정 검사는 실제 Airflow import 검사를 대체하지 않습니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했으며 이번 변경에는 웹 수정이 없습니다.
 
-사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개**, GHCR 이미지 2개 `v0.1.0` 업로드 성공 및 raw PV/PVC의 `Bound` 상태를 확인했습니다. 이후 Kubernetes 초기화 Job의 `schema_ready`, 웹 Pod `1/1 Running`, ClusterIP 및 `https://radar.selfronny.com`의 `/api/ready` 응답 `ready=true`와 `/` HTTP 200도 확인했습니다. 웹은 최초 비밀번호 인증 오류 후 Secret 재입력·재시작 절차를 거쳐 준비 상태 검사를 통과했습니다. 실제 PVC 파일 쓰기·순위/이력 화면 내용·대량 적재 성능 및 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다. 수집기 `v0.2.0` 이미지의 서버 빌드·실행 검증도 별도입니다.
+2026-09-28 Mac 로컬의 합성 100만 도메인 검사에서 12개 bucket의 1,888,700행 검증·Parquet 저장·재읽기·해시 검증에 약 26.1초, 최대 RSS 약 549.4MiB를 관측했습니다. 규칙적인 가상 도메인이므로 실제 압축률·Ubuntu 성능 추정치가 아닙니다. 네트워크·PostgreSQL 적재도 제외합니다. 선택 실행: `RADAR_SCALE_TEST=1 uv run python -m unittest discover -s tests -p test_pipeline.py -v`.
+
+사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개**, GHCR 이미지 2개 `v0.1.0` 업로드 및 raw PV/PVC `Bound`를 확인했습니다. 이후 `schema_ready`, 웹 Pod `1/1 Running`, 내부·공개 HTTPS의 `ready=true`와 HTTP 200도 확인했습니다. 웹은 최초 비밀번호 인증 오류 후 Secret 재입력·재시작으로 정상화됐습니다. 수집기 `v0.2.0`의 빌드·검사·push, WORLD/KR 일간 각 100건 적재와 raw 경로 출력, 사용자의 화면 확인까지 완료했습니다. **새 v0.3.0 전체 수집의 서버 성능·실행 및 Gemini 실제 호출은 미검증**입니다.
 
 ```sh
 uv run python -m unittest discover -s tests -v
@@ -192,9 +195,9 @@ RADAR_TEST_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/radar_test' \
 
 ## Kubernetes 배포 — GHCR + Argo CD 수동 Sync
 
-**이 절의 명령은 서버에서 사용자가 실행할 절차입니다. 코드 업로드만으로 배포되지는 않습니다.** Application은 기존 Argo CD의 `argocd` namespace에 등록하고 앱 리소스는 `radar` namespace에 둡니다. 자동 동기화·자동 삭제·self-heal·이미지 자동 갱신은 설정하지 않았습니다. GitHub Actions와 실제 수집 CronJob도 아직 없습니다. JSON은 Kubernetes가 기본 지원하는 manifest 형식입니다.
+**이 절의 명령은 서버에서 사용자가 실행할 절차입니다. 코드 업로드만으로 배포되지는 않습니다.** Application은 기존 Argo CD의 `argocd` namespace에 등록하고 앱 리소스는 `radar` namespace에 둡니다. 자동 동기화·자동 삭제·self-heal·이미지 자동 갱신은 설정하지 않았습니다. GitHub Actions는 없으며 수집 스케줄은 CronJob 대신 Airflow로 관리합니다. JSON은 Kubernetes가 기본 지원하는 manifest 형식입니다.
 
-**첫 Sync 전 준비:** GHCR 이미지와 pull 권한, DB·조회 권한, `radar` namespace의 DB·GHCR Secret, 6절의 전용 터널 Secret `radar-tunnel`, 아래 raw 디렉터리 준비가 모두 필요합니다. StorageClass 없이 `ronny` 노드의 `/mnt/data/ronny-project/radar-data`를 사용하는 정적 local PV로 설정했습니다. 사용자 출력에서 PV/PVC `Bound`를 확인했지만 실제 Pod 파일 쓰기는 아직 검증하지 않았습니다. 예전 `radar-project` namespace에 리소스를 이미 배포했다면 이름 변경은 데이터 이전이 아니므로 별도 이전 계획 없이 기존 namespace/PVC를 삭제하지 않습니다.
+**첫 Sync 전 준비:** GHCR 이미지와 pull 권한, DB·조회 권한, `radar` namespace의 DB·GHCR Secret, 6절의 전용 터널 Secret `radar-tunnel`, 아래 raw 디렉터리 준비가 모두 필요합니다. StorageClass 없이 `ronny` 노드의 `/mnt/data/ronny-project/radar-data`를 사용하는 정적 local PV로 설정했습니다. 사용자 출력에서 PV/PVC `Bound`와 최초 수집의 raw 쓰기를 확인했습니다. 예전 `radar-project` namespace에 리소스를 이미 배포했다면 이름 변경은 데이터 이전이 아니므로 별도 이전 계획 없이 기존 namespace/PVC를 삭제하지 않습니다.
 
 ### 1. 서버에서 코드 받기와 사전 확인
 
@@ -461,21 +464,72 @@ kubectl -n db exec -it pg-archive-postgresql-0 -- \
       GROUP BY s.id ORDER BY s.period_date DESC, s.location;"
 ```
 
-화면은 [글로벌 일간](https://radar.selfronny.com/?kind=daily&location=WORLD) 또는 [한국 일간](https://radar.selfronny.com/?kind=daily&location=KR)을 선택합니다. 기본 화면의 주간 목록은 주간 수집 전까지 비어 있습니다. 첫 기준일은 비교 이력이 없으므로 변화 신호가 없고, Gemini 작업 전에는 미분류가 정상입니다. 자동 스케줄·전체 국가 탐색은 이 첫 실수집 검증 이후 연결합니다.
+화면은 [글로벌 일간](https://radar.selfronny.com/?kind=daily&location=WORLD) 또는 [한국 일간](https://radar.selfronny.com/?kind=daily&location=KR)을 선택합니다. 기본 화면의 주간 목록은 주간 수집 전까지 비어 있습니다. 첫 기준일은 비교 이력이 없으므로 변화 신호가 없고, Gemini 작업 전에는 미분류가 정상입니다. 위 수동 Job은 초기 검증용으로 남겨두며 Airflow 운영 중에는 함께 실행하지 않습니다.
 
 로컬에서 환경변수를 안전하게 준비했다면 `uv run --env-file .env python -m radar collect-daily --locations WORLD KR --date YYYY-MM-DD`로도 실행할 수 있습니다. 실제 유효한 원본 날짜로 바꾸고 테스트 DB/운영 DB를 혼동하지 마세요.
 
 ### 8. 샘플 검증과 파이프라인 실행
 
-샘플은 운영 DB가 아니라 별도 개발 DB에서 확인합니다. `pipeline-job.json`을 Git 제외 경로인 `k8s/local/`에 복사해 Secret 참조를 개발 DB 것으로 바꾸고 `args`를 `["demo"]`로 바꾸면 같은 Job 실행 절차로 샘플 적재를 검증할 수 있습니다. 실제 파일 적재는 PVC에 입력 파일을 준비한 뒤 `["ingest", "/data/input/snapshot.json"]`을 사용합니다. Job 입력 파일 배달과 정기 API 수집 스케줄은 아직 자동화하지 않았습니다.
+샘플은 운영 DB가 아니라 별도 개발 DB에서 확인합니다. `pipeline-job.json`을 Git 제외 경로인 `k8s/local/`에 복사해 Secret 참조를 개발 DB 것으로 바꾸고 `args`를 `["demo"]`로 바꾸면 같은 Job 실행 절차로 샘플 적재를 검증할 수 있습니다. 실제 파일 적재는 PVC에 입력 파일을 준비한 뒤 `["ingest", "/data/input/snapshot.json"]`을 사용합니다. 운영 수집은 아래 Airflow 경로를 사용합니다.
 
-raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹에는 raw PVC를 연결하지 않습니다. 자원 설정(웹 512Mi, 파이프라인 4Gi 제한)과 Job 제한 시간 30분은 초안의 시작값이지 100만 도메인 처리 실측값이 아닙니다. 입력 전체를 메모리에 올리는 현재 구현은 전수 수집 전에 메모리·시간 실측이 필요합니다. 초기 Job은 하나씩 실행하며 실제 수집·태깅 worker가 완성된 후 중복 실행 방지와 공통 API 예산을 포함해 CronJob을 연결합니다.
+raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹에는 raw PVC를 연결하지 않습니다. Parquet는 10,000행 단위로 읽고 쓰지만 입력 계약과 검증 결과는 메모리에 유지합니다. 파이프라인 4Gi 제한은 서버 실측에 따라 조정할 시작값입니다. 수동 Job은 제한 시간 30분, Airflow 수집 Pod는 2시간입니다. CronJob은 추가하지 않습니다.
+
+### 9. Airflow 자동 수집 연결
+
+기존 `pipeline` namespace의 KubernetesExecutor와 `airflow-practice` git-sync를 그대로 사용합니다. Steam DAG와 Airflow 공통 설정은 변경하지 않습니다. 실제 실행 계정은 사용자 출력에서 `pipeline/airflow-worker`로 확인했습니다.
+
+- `radar_daily`: 매일 13:00 KST, 이전 UTC 날짜의 WORLD + API 지역 목록을 순차 수집합니다.
+- `radar_weekly`: 화요일 14:00 KST, 실행 기준일 이전/당일 월요일에 끝난 주간 12개 파일을 수집합니다. 해당 기간이 덜 공개됐으면 실패하며 이전 주로 대체하지 않습니다.
+- 재시도는 30분 간격 2회이며 날짜는 DAG run에 고정합니다. `catchup=False`, DAG별 동시 실행 1개, 공통 `radar_collection` pool 1 slot입니다.
+- KPO를 실행하는 Airflow worker Pod 1개와 `radar`의 수집 Pod 1개가 추가됩니다. 지역마다 Pod를 만들지 않습니다.
+- DAG는 처음 등록할 때 일시정지 상태입니다. 최초 정상 실행을 확인한 다음 활성화합니다.
+
+전체 지역 목록은 매번 API에서 조회합니다. 사용자 계정의 탐색 결과는 253개 **국가·지역 코드**이며, 253개 모두 순위 자료가 있다는 뜻은 아닙니다. 400/404, 빈 응답, 100행 미만 응답을 임의로 정상 제외하지 않습니다. 검증된 지역은 독립적으로 공개하고 실패 목록은 로그에 남긴 뒤 task를 실패 처리합니다. 재시도 때 동일 자료는 중복 적재하지 않습니다. 첫 실행의 실패 응답을 확인하기 전에는 영구 제외 국가 목록을 만들지 않습니다.
+
+주간은 최근 catalog 100개 안에서 **정확히 지정된 주간**을 찾습니다. API 정렬에 기대어 첫 파일을 선택하지 않습니다. 과거 백필·100개 밖의 주차는 지원하지 않고 명시적으로 실패합니다. 각 파일은 이동하는 alias 대신 숫자 dataset ID로 다운로드하며, 제목·설명·기간 등 catalog 메타데이터를 raw에 보존합니다.
+
+#### 이미지와 권한 준비 — Ubuntu
+
+```bash
+cd /mnt/data/ronny-project/radar-project
+git pull --ff-only
+docker build -f Dockerfile.pipeline -t ghcr.io/beolle/radar-project-pipeline:v0.3.0 .
+docker run --rm --read-only --tmpfs /tmp \
+  --mount "type=bind,src=$PWD/tests,dst=/tests,readonly" \
+  --entrypoint python ghcr.io/beolle/radar-project-pipeline:v0.3.0 \
+  -m unittest discover -s /tests -p test_cloudflare.py -v
+docker push ghcr.io/beolle/radar-project-pipeline:v0.3.0
+```
+
+Argo CD의 `radar` Application을 수동 Sync하여 `k8s/airflow-rbac.json`의 Role/RoleBinding을 반영합니다. 권한은 `radar` namespace의 Pod 생성·조회·로그·정리와 이벤트 조회뿐입니다. Secret 조회, 다른 namespace 권한, ClusterRole은 추가하지 않습니다.
+
+```bash
+kubectl auth can-i create pods -n radar --as=system:serviceaccount:pipeline:airflow-worker
+kubectl auth can-i get pods/log -n radar --as=system:serviceaccount:pipeline:airflow-worker
+kubectl -n pipeline exec deployment/airflow-scheduler -c scheduler -- \
+  airflow pools set radar_collection 1 'Serialize Radar collection pods'
+```
+
+#### DAG 배포와 첫 실행
+
+`airflow/radar_collection.py` 한 파일을 기존 **airflow-practice 저장소의 git-sync가 읽는 경로**에 추가·커밋·push합니다. Radar 저장소만 push해도 기존 Airflow가 이 파일을 읽는 것은 아닙니다. 기존 git-sync URL을 Radar 저장소로 바꾸지 않습니다. 실제 설치된 Airflow/Kubernetes provider 버전의 import 검사를 통과해야 합니다.
+
+```bash
+kubectl -n pipeline exec deployment/airflow-scheduler -c scheduler -- \
+  airflow dags list-import-errors
+kubectl -n pipeline exec deployment/airflow-scheduler -c scheduler -- \
+  airflow dags list
+```
+
+UI에서 `radar_daily`, `radar_weekly`와 pool을 확인한 뒤 최초 실행도 Airflow에서 진행합니다. 수집 로그, DB 주차·지역별 행 수, raw 파일, 공개 화면을 확인하고 스케줄을 활성화합니다. API 버전 호환·이미지 다운로드·실제 국가별 가용성·100만 건 PostgreSQL 적재는 이 서버 검증에서 확인할 사항입니다.
+
+롤백은 두 Radar DAG를 pause하고 실행 중 task/수집 Pod 종료 여부를 확인한 뒤 DAG 파일만 이전 버전으로 되돌립니다. 기존 v0.2.0 이미지·raw·DB는 삭제하지 않습니다. 새 주간 자료는 12개 bucket이므로 이전 코드로 **재적재하지 말고**, 기존 웹으로 조회만 유지합니다. 스키마 변경은 없습니다. 주간 옛 4개/새 12개 방식의 이력을 섞어 비교하면 세분화 자체가 상승으로 보일 수 있으므로 기존 주간 이력이 있는 DB에는 별도 전환 처리가 필요합니다. 현재 확인된 운영 데이터는 일간 WORLD/KR뿐입니다.
 
 ## 개인 서버 배포 전 남은 작업
 
-1. 일간 수집기 실제 API·적재 검증, 국가 목록 탐색, 주간 bucket adapter와 원본 기간·파일 완결성 검증
+1. v0.3.0 빌드, Airflow DAG 배포·import·권한 확인, 전체 지역/주간 첫 실수집 검증
 2. Gemini 실제 호출 adapter, 공통 일일 예산·재시도·작업 선점·초기 모집단 관리
-3. 지속 실행 스케줄, 장애 알림, DB 백업과 복구 확인
+3. 첫 실행 후 스케줄 활성화, 장애 알림, DB 백업과 복구 확인
 4. 실제 수집 데이터의 외부 화면 확인, 장비 기준 부하 검사
 5. 사후 수정·과거 백필 시 영향받는 mart 재계산, 필요하면 별도 migration 체계
 
@@ -485,6 +539,9 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 
 - [Cloudflare Radar 순위 데이터](https://developers.cloudflare.com/radar/investigate/domain-ranking-datasets/)
 - [Cloudflare 순위 API](https://developers.cloudflare.com/api/resources/radar/subresources/ranking/methods/top/)
+- [Cloudflare dataset 목록](https://developers.cloudflare.com/api/resources/radar/subresources/datasets/methods/list/)
+- [Cloudflare dataset CSV 다운로드](https://developers.cloudflare.com/api/resources/radar/subresources/datasets/methods/get/)
+- [Airflow KubernetesPodOperator](https://airflow.apache.org/docs/apache-airflow-providers-cncf-kubernetes/stable/operators.html)
 - [Cloudflare Radar API 토큰 준비](https://developers.cloudflare.com/radar/get-started/first-request/)
 - [Gemini URL Context](https://ai.google.dev/gemini-api/docs/url-context)
 - [Gemini 사용량 한도](https://ai.google.dev/gemini-api/docs/rate-limits)

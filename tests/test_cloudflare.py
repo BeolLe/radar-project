@@ -11,6 +11,14 @@ from urllib.parse import parse_qs, urlsplit
 
 from radar import cloudflare
 from radar.__main__ import archive, digest, main, read_archive
+from radar.domain import FULL_BUCKETS, validate_snapshot
+
+
+def catalog(end="2026-01-19", start="2026-01-12"):
+    return {"success": True, "result": {"datasets": [
+        {"id": index + 1, "type": "RANKING_BUCKET", "meta": {
+            "top": bucket, "targetDateStart": start, "targetDateEnd": end}}
+        for index, bucket in enumerate(FULL_BUCKETS)]}}
 
 
 def response(day="2026-01-20"):
@@ -23,6 +31,79 @@ def response(day="2026-01-20"):
 
 
 class CloudflareTests(unittest.TestCase):
+    def test_weekly_catalog_pins_period_and_rejects_incomplete_latest(self):
+        with patch("radar.cloudflare.request_json", return_value=catalog()) as fetch:
+            plan = cloudflare.weekly_plan("synthetic-token", "2026-01-20")
+            self.assertEqual([row["meta"]["top"] for row in plan], list(FULL_BUCKETS))
+            self.assertEqual(fetch.call_args.args[2]["limit"], 100)
+        older = catalog("2026-01-12", "2026-01-05")["result"]["datasets"]
+        for mutate in (lambda rows: rows.pop(), lambda rows: rows.append(copy.deepcopy(rows[0])),
+                       lambda rows: rows[0]["meta"].update(targetDateStart="2026-01-11")):
+            envelope = catalog()
+            mutate(envelope["result"]["datasets"])
+            envelope["result"]["datasets"].extend(older)
+            with patch("radar.cloudflare.request_json", return_value=envelope), self.assertRaises(ValueError):
+                cloudflare.weekly_plan("synthetic-token", "2026-01-20")
+        with patch("radar.cloudflare.request_json", return_value=catalog()), self.assertRaises(ValueError):
+            cloudflare.weekly_plan("synthetic-token", "2026-01-27")
+
+    def test_weekly_csv_and_twelve_bucket_adapter(self):
+        self.assertEqual(cloudflare.bucket_rows(b"\xef\xbb\xbfdomain\nb.example\na.example\n", 2),
+                         [{"domain": "a.example"}, {"domain": "b.example"}])
+        for body in (b"rank,domain\n1,a.example\n", b"domain\n", b"domain\na.example,extra\n"):
+            with self.assertRaises(ValueError):
+                cloudflare.bucket_rows(body, 1)
+        with self.assertRaises(ValueError):
+            cloudflare.bucket_rows(b"domain\na.example\nb.example\n", 1)
+        # Scale only fixture counts; exercise the real twelve-bucket payload validator.
+        with patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": "synthetic-token"}), patch(
+            "radar.cloudflare.request_json", return_value=catalog()
+        ), patch("radar.cloudflare.request_bytes", return_value=b"domain\na.example\n") as fetch, patch(
+            "radar.cloudflare.bucket_rows", return_value=[{"domain": "a.example"}]
+        ), patch("radar.cloudflare.validate_snapshot") as validate, patch("sys.stdout", new_callable=StringIO):
+            payload = cloudflare.collect_weekly("2026-01-20")
+            self.assertEqual(payload["date"], "2026-01-19")
+            self.assertEqual(payload["period_start"], "2026-01-12")
+            self.assertEqual(fetch.call_count, 12)
+            self.assertEqual(fetch.call_args.args[1], "/datasets/12")
+            validate.assert_called_once_with(payload)
+        for source in payload["sources"]:
+            source["expected_rows"] = 1
+        _, rows, values = validate_snapshot(payload)
+        self.assertEqual(len(rows), 12)
+        self.assertEqual(values, {"a.example": 200})
+        payload["sources"][1]["rows"] = [{"domain": "other.example"}]
+        with self.assertRaises(ValueError):
+            validate_snapshot(payload)
+
+    def test_location_pagination_waits_for_empty_page(self):
+        pages = [{"success": True, "result": {"locations": rows}}
+                 for rows in ([{"alpha2": "KR"}], [{"alpha2": "JP"}], [])]
+        with patch("radar.cloudflare.request_json", side_effect=pages) as fetch:
+            rows = list(cloudflare.result_rows("synthetic-token", "/entities/locations", "locations", {}))
+            self.assertEqual([row["alpha2"] for row in rows], ["KR", "JP"])
+            self.assertEqual([call.args[2]["offset"] for call in fetch.call_args_list], [0, 1, 2])
+        with patch("radar.cloudflare.request_json", return_value=pages[0]), self.assertRaises(ValueError):
+            list(cloudflare.result_rows("synthetic-token", "/entities/locations", "locations", {}))
+
+    def test_all_locations_partial_failure_is_not_success_or_exit(self):
+        with patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": "synthetic-token"}), patch(
+            "radar.cloudflare.result_rows", return_value=[{"alpha2": "KR"}, {"alpha2": "AQ"}]
+        ), patch("radar.cloudflare.request_top", side_effect=[response(), {"success": False}, response()]), patch(
+            "radar.cloudflare.time.sleep"
+        ), patch("sys.stdout", new_callable=StringIO):
+            payloads, report = cloudflare.collect_all_daily("2026-01-20")
+        self.assertEqual([payload["location"] for payload in payloads], ["WORLD", "KR"])
+        self.assertEqual([row["status"] for row in report], ["validated", "failed", "validated"])
+        with patch("radar.cloudflare.collect_all_daily", return_value=(payloads, report)), patch(
+            "radar.__main__.ingest", return_value={"status": "already_published"}
+        ) as ingest, patch("sys.stdout", new_callable=StringIO), patch(
+            "sys.argv", ["radar", "collect-all-daily", "--date", "2026-01-20"]
+        ), self.assertRaises(SystemExit) as caught:
+            main()
+        self.assertEqual(caught.exception.code, 1)
+        self.assertEqual(ingest.call_count, 2)
+
     def test_raw_roundtrip_and_stable_identity(self):
         envelope = response()
         payload = cloudflare.daily_snapshot(envelope, "KR", "2026-01-20")

@@ -6,4 +6,5 @@ resources:
   - storage.json
   - web.json
   - cloudflared.json
+  - airflow-rbac.json
 # Jobs are intentionally separate: applying the web must not run database writes.

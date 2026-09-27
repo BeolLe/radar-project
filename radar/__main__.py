@@ -22,8 +22,10 @@ def connect():
 
 
 def digest(payload) -> str:
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
-                                     allow_nan=False).encode()).hexdigest()
+    result = hashlib.sha256()
+    for chunk in json.JSONEncoder(sort_keys=True, ensure_ascii=False, allow_nan=False).iterencode(payload):
+        result.update(chunk.encode())
+    return result.hexdigest()
 
 
 def archive(payload: dict, batch: str) -> Path:
@@ -36,19 +38,21 @@ def archive(payload: dict, batch: str) -> Path:
         if pq.read_schema(target).metadata.get(b"batch_hash") != batch.encode():
             raise ValueError("Existing raw file metadata mismatch")
         return target
-    # ponytail: materializes one input snapshot; use streaming Arrow batches for larger sources.
-    rows = [{"source_id": source["id"], "bucket": source.get("bucket"),
-             "payload": json.dumps(row, ensure_ascii=False)}
-            for source in payload["sources"] for row in source["rows"]]
-    table = pa.Table.from_pylist(rows)
     metadata = {**payload, "sources": [{k: v for k, v in s.items() if k != "rows"}
                                        for s in payload["sources"]]}
-    table = table.replace_schema_metadata({b"batch_hash": batch.encode(),
-                                           b"source_metadata": json.dumps(metadata).encode()})
+    schema = pa.schema([("source_id", pa.string()), ("bucket", pa.int64()), ("payload", pa.string())],
+                       metadata={b"batch_hash": batch.encode(),
+                                 b"source_metadata": json.dumps(metadata).encode()})
     with tempfile.NamedTemporaryFile(dir=directory, suffix=".parquet", delete=False) as f:
         temporary = Path(f.name)
     try:
-        pq.write_table(table, temporary, compression="zstd")
+        with pq.ParquetWriter(temporary, schema, compression="zstd") as writer:
+            for source in payload["sources"]:
+                for start in range(0, len(source["rows"]), 10_000):
+                    rows = [{"source_id": source["id"], "bucket": source.get("bucket"),
+                             "payload": json.dumps(row, ensure_ascii=False)}
+                            for row in source["rows"][start:start + 10_000]]
+                    writer.write_table(pa.Table.from_pylist(rows, schema=schema))
         os.replace(temporary, target)
     finally:
         temporary.unlink(missing_ok=True)
@@ -62,6 +66,7 @@ def ingest(payload: dict) -> dict:
     raw = archive(payload, batch)
     # Stage is reconstructed from raw Parquet, not from an in-memory alternate path.
     meta, rows, _ = validate_snapshot(read_archive(raw, batch))
+    del _
     with connect() as conn:
         # ponytail: one ingestion writer for this draft; partition locks by stream if needed.
         conn.execute("SELECT pg_advisory_lock(73194201)")
@@ -176,13 +181,14 @@ def import_tags(request: dict, envelope: dict) -> dict:
 
 def read_archive(path: Path, expected_hash: str) -> dict:
     import pyarrow.parquet as pq
-    table = pq.read_table(path)
-    payload = json.loads(table.schema.metadata[b"source_metadata"])
+    parquet = pq.ParquetFile(path)
+    payload = json.loads(parquet.schema_arrow.metadata[b"source_metadata"])
     by_id = {source["id"]: source for source in payload["sources"]}
     for source in by_id.values():
         source["rows"] = []
-    for row in table.to_pylist():
-        by_id[row["source_id"]]["rows"].append(json.loads(row["payload"]))
+    for batch in parquet.iter_batches(batch_size=10_000, columns=["source_id", "payload"]):
+        for row in batch.to_pylist():
+            by_id[row["source_id"]]["rows"].append(json.loads(row["payload"]))
     if digest(payload) != expected_hash:
         raise ValueError("Raw Parquet content hash mismatch")
     return payload
@@ -218,6 +224,10 @@ def main():
     collect = commands.add_parser("collect-daily", help="Fetch and ingest complete Cloudflare POPULAR top-100 lists")
     collect.add_argument("--locations", nargs="+", default=["WORLD", "KR"])
     collect.add_argument("--date", help="Exact dataset date YYYY-MM-DD; default: latest returned by API")
+    all_daily = commands.add_parser("collect-all-daily", help="Discover all locations and publish independently validated lists")
+    all_daily.add_argument("--date", required=True, help="Exact dataset date YYYY-MM-DD")
+    weekly = commands.add_parser("collect-weekly", help="Collect all twelve global buckets for the latest Monday ending on/before as-of")
+    weekly.add_argument("--as-of", required=True, help="Pinned scheduler date YYYY-MM-DD; no older-week fallback")
     commands.add_parser("demo", help="Import small synthetic snapshots; no network calls")
     commands.add_parser("demo-input", help="Print a valid synthetic weekly source contract")
     prepare = commands.add_parser("prepare-tags", help="Print offline request draft; no API call")
@@ -241,6 +251,21 @@ def main():
         payloads = collect_daily(args.locations, args.date)
         result = [{"date": payload["date"], "location": payload["location"],
                    "rows": 100, **ingest(payload)} for payload in payloads]
+    elif args.command == "collect-all-daily":
+        from .cloudflare import collect_all_daily
+        payloads, report = collect_all_daily(args.date)
+        for payload in payloads:
+            print(json.dumps({"event": "daily_publish", "date": payload["date"],
+                              "location": payload["location"], **ingest(payload)}), flush=True)
+        result = {"date": args.date, "locations": len(report), "published": len(payloads),
+                  "failures": [row for row in report if row["status"] == "failed"]}
+        if result["failures"]:
+            print(json.dumps(result, ensure_ascii=False), flush=True)
+            raise SystemExit(1)
+    elif args.command == "collect-weekly":
+        from .cloudflare import collect_weekly
+        payload = collect_weekly(args.as_of)
+        result = {"date": payload["date"], "location": "WORLD", "buckets": 12, **ingest(payload)}
     elif args.command == "demo":
         result = [ingest(p) for p in demo_snapshots()]
     elif args.command == "prepare-tags":

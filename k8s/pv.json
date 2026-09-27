@@ -1,0 +1,24 @@
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolume",
+  "metadata": {
+    "name": "radar-raw-pv",
+    "annotations": {"argocd.argoproj.io/sync-options": "Prune=false,Delete=false"}
+  },
+  "spec": {
+    "capacity": {"storage": "10Gi"},
+    "volumeMode": "Filesystem",
+    "accessModes": ["ReadWriteOnce"],
+    "persistentVolumeReclaimPolicy": "Retain",
+    "storageClassName": "",
+    "claimRef": {"namespace": "radar", "name": "radar-raw"},
+    "local": {"path": "/mnt/data/ronny-project/radar-data"},
+    "nodeAffinity": {
+      "required": {
+        "nodeSelectorTerms": [{
+          "matchFields": [{"key": "metadata.name", "operator": "In", "values": ["ronny"]}]
+        }]
+      }
+    }
+  }
+}

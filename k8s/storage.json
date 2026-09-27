@@ -1,8 +1,14 @@
 {
   "apiVersion": "v1",
   "kind": "PersistentVolumeClaim",
-  "metadata": {"name": "radar-raw", "namespace": "radar"},
+  "metadata": {
+    "name": "radar-raw", "namespace": "radar",
+    "annotations": {"argocd.argoproj.io/sync-options": "Prune=false,Delete=false"}
+  },
   "spec": {
+    "storageClassName": "",
+    "volumeName": "radar-raw-pv",
+    "volumeMode": "Filesystem",
     "accessModes": ["ReadWriteOnce"],
     "resources": {"requests": {"storage": "10Gi"}}
   }

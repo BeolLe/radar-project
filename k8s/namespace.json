@@ -1,5 +1,8 @@
 {
   "apiVersion": "v1",
   "kind": "Namespace",
-  "metadata": {"name": "radar"}
+  "metadata": {
+    "name": "radar",
+    "annotations": {"argocd.argoproj.io/sync-options": "Prune=false,Delete=false"}
+  }
 }

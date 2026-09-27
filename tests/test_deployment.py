@@ -33,6 +33,31 @@ class DeploymentTests(unittest.TestCase):
         readiness = pods[0]["containers"][0]["readinessProbe"]["httpGet"]["path"]
         self.assertTrue((ROOT / "web/app" / readiness.lstrip("/") / "route.ts").is_file())
 
+    def test_static_storage_is_reserved_and_retained(self):
+        pv = json.loads((ROOT / "k8s/pv.json").read_text())
+        pvc = json.loads((ROOT / "k8s/storage.json").read_text())
+        namespace = json.loads((ROOT / "k8s/namespace.json").read_text())
+        self.assertEqual(pv["kind"], "PersistentVolume")
+        self.assertNotIn("namespace", pv["metadata"])
+        self.assertEqual(pvc["spec"]["volumeName"], pv["metadata"]["name"])
+        self.assertEqual(pv["spec"]["claimRef"], {
+            "name": pvc["metadata"]["name"], "namespace": pvc["metadata"]["namespace"],
+        })
+        self.assertEqual(pv["spec"]["persistentVolumeReclaimPolicy"], "Retain")
+        for resource in (pv, pvc):
+            self.assertEqual(resource["spec"]["storageClassName"], "")
+            self.assertEqual(resource["spec"]["volumeMode"], "Filesystem")
+            self.assertEqual(resource["spec"]["accessModes"], ["ReadWriteOnce"])
+        for resource in (pv, pvc, namespace):
+            options = resource["metadata"]["annotations"]["argocd.argoproj.io/sync-options"]
+            self.assertEqual(set(options.split(",")), {"Prune=false", "Delete=false"})
+        self.assertEqual(pv["spec"]["capacity"], pvc["spec"]["resources"]["requests"])
+        self.assertEqual(pv["spec"]["local"]["path"], "/mnt/data/ronny-project/radar-data")
+        self.assertEqual(pv["spec"]["nodeAffinity"]["required"]["nodeSelectorTerms"], [{
+            "matchFields": [{"key": "metadata.name", "operator": "In", "values": ["ronny"]}],
+        }])
+        self.assertIn("  - pv.json", (ROOT / "k8s/kustomization.yaml").read_text())
+
     def test_argocd_is_manual_and_scoped(self):
         app = json.loads((ROOT / "argocd/application.json").read_text())
         self.assertEqual(app["metadata"], {"name": "radar", "namespace": "argocd"})

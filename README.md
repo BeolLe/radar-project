@@ -34,7 +34,7 @@ web/                    Next.js 앱과 서버 전용 PostgreSQL 조회
 compose.yaml            로컬 개발 PostgreSQL만 실행하는 선택 사항
 Dockerfile.web          Next.js 컨테이너 이미지
 Dockerfile.pipeline     Python CLI 컨테이너 이미지
-k8s/                    웹 Deployment/Service, raw PVC, 별도 수동 Job
+k8s/                    웹 Deployment/Service, raw 전용 local PV/PVC, 별도 수동 Job
 argocd/application.json  radar Application 등록용; 자동 동기화 없음
 .env.example            비밀정보 없는 환경변수 예시
 ```
@@ -170,7 +170,7 @@ uv run --env-file .env python -m radar import-tags detail-request.json detail-re
 
 ## 검증
 
-로컬에서 단위·배포 계약 검사 11개(Parquet 왕복·namespace·Argo CD 수동 정책 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
+로컬에서 단위·배포 계약 검사 12개(Parquet 왕복·namespace·정적 PV 연결·Argo CD 수동 정책 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
 
 사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개, 조회 전용 계정으로 웹 `/api/ready`의 `ready=true`**를 확인했습니다. 이 결과는 실제 Kubernetes 배포·순위/이력 화면 전체 검증·대량 적재 성능 검증을 의미하지 않습니다. GHCR 업로드 완료 및 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다.
 
@@ -194,7 +194,7 @@ RADAR_TEST_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/radar_test' \
 
 **이 절의 명령은 서버에서 사용자가 실행할 절차입니다. 코드 업로드만으로 배포되지는 않습니다.** Application은 기존 Argo CD의 `argocd` namespace에 등록하고 앱 리소스는 `radar` namespace에 둡니다. 자동 동기화·자동 삭제·self-heal·이미지 자동 갱신은 설정하지 않았습니다. GitHub Actions와 실제 수집 CronJob도 아직 없습니다. JSON은 Kubernetes가 기본 지원하는 manifest 형식입니다.
 
-**첫 Sync 전 준비:** GHCR 이미지와 pull 권한, DB·조회 권한, `radar` namespace의 Secret, 실제 서버에 맞춘 PV/PVC가 모두 필요합니다. 현재 서버에는 StorageClass가 없으므로 아래 기본 PVC 예시를 그대로 Sync하지 않습니다. 정적 PV 연결 방식·보관 경로를 먼저 확정해야 합니다. 예전 `radar-project` namespace에 리소스를 이미 배포했다면 이름 변경은 데이터 이전이 아니므로 별도 이전 계획 없이 기존 namespace/PVC를 삭제하지 않습니다.
+**첫 Sync 전 준비:** GHCR 이미지와 pull 권한, DB·조회 권한, `radar` namespace의 Secret, 아래 raw 디렉터리 준비가 모두 필요합니다. StorageClass 없이 `ronny` 노드의 `/mnt/data/ronny-project/radar-data`를 사용하는 정적 local PV로 설정했습니다. 실제 서버의 PV/PVC 연결과 Pod 파일 쓰기는 아직 검증하지 않았습니다. 예전 `radar-project` namespace에 리소스를 이미 배포했다면 이름 변경은 데이터 이전이 아니므로 별도 이전 계획 없이 기존 namespace/PVC를 삭제하지 않습니다.
 
 ### 1. 서버에서 코드 받기와 사전 확인
 
@@ -249,6 +249,19 @@ Ubuntu에서 검증한 `radar-pipeline:test`, `radar-web:test`가 남아 있고 
 
 ### 4. Secret·raw 볼륨 준비
 
+먼저 **Ubuntu의 `ronny` 노드에서만** 실행해 데이터 디렉터리를 준비합니다. 파이프라인 컨테이너의 UID/GID `10001:10001`에 맞춥니다. 이미 경로가 있거나 심볼릭 링크라면 기존 내용을 확인하기 전에는 소유권을 바꾸지 않습니다.
+
+```sh
+if [ -e /mnt/data/ronny-project/radar-data ] || [ -L /mnt/data/ronny-project/radar-data ]; then
+  echo '이미 경로가 있습니다. 용도와 소유권을 확인한 뒤 진행하세요.'
+  ls -ld /mnt/data/ronny-project/radar-data
+else
+  sudo install -d -o 10001 -g 10001 -m 2770 /mnt/data/ronny-project/radar-data
+fi
+```
+
+연결은 `radar-raw-pv` → namespace `radar`의 PVC `radar-raw` → 파이프라인 `/data` 순서입니다. 따라서 실제 Parquet는 서버의 `/mnt/data/ronny-project/radar-data/raw/`에 쌓입니다. `local` 볼륨과 `metadata.name=ronny` node affinity로 다른 노드의 같은 경로를 사용하지 않게 했습니다. 파일·디스크가 해당 노드에 있으므로 노드 장애 시 자동으로 다른 노드에서 복구되지 않습니다.
+
 ```sh
 kubectl apply -f k8s/namespace.json
 ```
@@ -259,10 +272,17 @@ kubectl apply -f k8s/namespace.json
 chmod 600 /secure/path/radar-pipeline.env /secure/path/radar-web.env
 kubectl -n radar create secret generic radar-pipeline-db --from-env-file=/secure/path/radar-pipeline.env
 kubectl -n radar create secret generic radar-web-db --from-env-file=/secure/path/radar-web.env
+kubectl apply -f k8s/pv.json
 kubectl apply -f k8s/storage.json
+kubectl get pv radar-raw-pv
+kubectl -n radar get pvc radar-raw
 ```
 
-`k8s/storage.json`은 기본 StorageClass를 사용하는 **10Gi 시험용 PVC 예시**입니다. 1년 보관 용량 산정치가 아닙니다. 동적 생성 환경에서는 사용할 StorageClass를 지정하고, 현재 서버처럼 정적 PV를 쓰는 환경에서는 새 Radar 전용 PV와 PVC의 class·접근 모드·용량·연결 대상을 맞춥니다. 기존 PostgreSQL이나 다른 프로젝트의 PV를 재사용하지 않습니다. 운영 스토리지, 확장·백업·reclaim policy를 확인하고 크기를 정하세요. `WaitForFirstConsumer` 클래스라면 Job이 배치되기 전 Pending인 것은 정상일 수 있습니다. Job 삭제와 달리 PVC·namespace 삭제는 raw 자료 손실로 이어질 수 있으므로 초기화 명령처럼 사용하지 않습니다.
+이 PV/PVC는 `storageClassName: ""`, PVC의 `volumeName`, PV의 `claimRef`로 서로 지정되어 있습니다. StorageClass 설치나 자동 볼륨 생성이 필요하지 않으며 기존 PostgreSQL·다른 프로젝트 PV를 사용하지 않습니다. 초기화 Job 전에 양쪽이 `Bound`인지 확인합니다. 이미 다른 spec으로 만든 PVC가 있다면 강제로 삭제·재생성하지 말고 먼저 현재 연결을 확인합니다.
+
+**10Gi는 초기 검증용 용량 선언이며, 1년 보관 산정치나 디스크를 잘라 예약하는 설정이 아닙니다.** 일반 디렉터리를 사용하는 이 구성에는 10Gi 쓰기 차단 quota가 없으므로 같은 파일시스템의 남은 용량을 감시해야 합니다. PV 이름·경로·node affinity 변경이나 용량 증설을 단순 이미지 업데이트처럼 적용하지 않습니다.
+
+PV는 `Retain`이고 Namespace·PV·PVC에는 Argo CD의 `Prune=false,Delete=false`를 설정했습니다. Argo CD 정리 과정에서 스토리지를 의도치 않게 지우지 않도록 한 것이며, `kubectl delete`, 파일 직접 삭제, 디스크 고장까지 막는 백업은 아닙니다. Namespace/PVC/PV 삭제를 초기화 명령처럼 사용하지 않습니다. 초기 수동 준비 이후에는 이 리소스 정의도 Argo CD가 같은 Git 설정을 관리합니다. 기존 다른 Application이 같은 리소스를 관리한다면 소유권부터 확인합니다.
 
 Secret은 저장소 밖에 둔다는 것만으로 안전이 완성되지 않습니다. 클러스터의 RBAC·저장 시 암호화 정책도 확인해야 합니다. 웹에는 API 키·쓰기 DB 계정을 전달하지 않습니다.
 
@@ -285,7 +305,7 @@ kubectl apply -f argocd/application.json
 kubectl -n argocd get application radar
 ```
 
-이 등록만으로 웹은 배포되지 않습니다. Argo CD 화면에서 `radar`의 대상이 `radar-project.git` / `main` / `k8s`, destination namespace가 `radar`인지 확인합니다. Diff를 검토한 뒤 **수동 Sync**를 실행하며 Prune는 선택하지 않습니다. Application에 자동 동기화 정책과 cascade 삭제 finalizer를 넣지 않았습니다. 다만 UI에서 명시적으로 cascade 삭제나 prune를 선택하면 삭제될 수 있으므로 별도 주의가 필요합니다.
+이 등록만으로 웹은 배포되지 않습니다. Argo CD 화면에서 `radar`의 대상이 `radar-project.git` / `main` / `k8s`, destination namespace가 `radar`인지 확인합니다. Diff를 검토한 뒤 **수동 Sync**를 실행하며 Prune는 선택하지 않습니다. Application에 자동 동기화 정책과 cascade 삭제 finalizer를 넣지 않았고 스토리지 리소스는 별도 삭제 방지 옵션이 있습니다. 기존 AppProject `default` 정책에서 Namespace·PersistentVolume 같은 cluster-scoped 리소스를 금지한다면 이 앱만을 위해 전역 정책을 임의로 풀지 말고 권한·관리 경계를 먼저 결정합니다.
 
 Sync 이후 확인:
 
@@ -324,8 +344,11 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 - [Gemini 사용량 한도](https://ai.google.dev/gemini-api/docs/rate-limits)
 - [Kubernetes Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/)
 - [Kubernetes Secret](https://kubernetes.io/docs/concepts/configuration/secret/)
+- [Kubernetes local 볼륨](https://kubernetes.io/docs/concepts/storage/volumes/#local)
+- [Kubernetes PV 예약과 보존](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)
 - [uv Docker 연동](https://docs.astral.sh/uv/guides/integration/docker/)
 - [Argo CD Application 명세](https://argo-cd.readthedocs.io/en/stable/user-guide/application-specification/)
 - [Argo CD 자동 동기화 정책](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)
+- [Argo CD 리소스별 동기화·삭제 옵션](https://argo-cd.readthedocs.io/en/stable/user-guide/sync-options/)
 
 Cloudflare 데이터를 공개할 때는 해당 데이터 이용 조건과 출처 표시를 유지해야 합니다. 저장소에는 제3자 원본 데이터나 실제 API 응답을 포함하지 않습니다.

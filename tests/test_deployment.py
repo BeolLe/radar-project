@@ -99,6 +99,25 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(container["livenessProbe"]["tcpSocket"], {"port": "metrics"})
         self.assertIn("  - cloudflared.json", (ROOT / "k8s/kustomization.yaml").read_text())
 
+    def test_collection_job_is_manual_and_reuses_pipeline_security(self):
+        collect = json.loads((ROOT / "k8s/collect-job.json").read_text())
+        init = json.loads((ROOT / "k8s/pipeline-job.json").read_text())
+        self.assertEqual(collect["metadata"], {"generateName": "radar-collect-daily-", "namespace": "radar"})
+        self.assertNotIn("collect-job.json", (ROOT / "k8s/kustomization.yaml").read_text())
+        self.assertEqual(collect["spec"]["backoffLimit"], 0)
+        pod = collect["spec"]["template"]["spec"]
+        base = init["spec"]["template"]["spec"]
+        for key in ("securityContext", "volumes", "imagePullSecrets", "restartPolicy", "automountServiceAccountToken"):
+            self.assertEqual(pod[key], base[key])
+        container = pod["containers"][0]
+        self.assertEqual(container["args"], ["collect-daily", "--locations", "WORLD", "KR"])
+        self.assertEqual(container["image"], "ghcr.io/beolle/radar-project-pipeline:v0.2.0")
+        self.assertEqual(container["env"][-1], {"name": "CLOUDFLARE_API_TOKEN", "valueFrom": {
+            "secretKeyRef": {"name": "radar-cloudflare-api", "key": "token"},
+        }})
+        for key in ("securityContext", "resources", "volumeMounts"):
+            self.assertEqual(container[key], base["containers"][0][key])
+
     def test_build_context_excludes_secrets(self):
         excluded = (ROOT / ".dockerignore").read_text().splitlines()
         for entry in (".git", "**/.env*", "secrets", "data", "**/node_modules", "k8s/local"):

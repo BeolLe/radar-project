@@ -2,7 +2,7 @@
 
 Cloudflare Radar 도메인 순위 이력을 누적하고, 변화 신호와 Gemini 태그를 조회하는 **개인 서버용 프로젝트 초안**입니다.
 
-**현재 상태:** 파일 기반 적재·변화 계산·태그 요청 준비/결과 검증·Next.js 조회를 구현했습니다. 실제 Cloudflare/Gemini API 수집기와 자동 운영 worker는 아직 연결하지 않았습니다. `.example` 가상 데이터로 구조를 확인하는 단계이며 운영 완성품이나 API 수집 실적이 아닙니다.
+**현재 상태:** 파일 기반 적재·변화 계산·태그 요청 준비/결과 검증·Next.js 조회와 Cloudflare 일간 POPULAR Top 100 수집 명령을 구현했습니다. Kubernetes 웹 배포와 공개 HTTPS 응답은 사용자 로그에서 확인했습니다. 새 일간 수집기는 합성 응답으로 검증했으며 계정의 실제 API 호출·적재는 아직 실행 전입니다. 주간 대량 수집기·전체 국가 탐색·Gemini 호출·자동 스케줄은 후속 작업입니다.
 
 ## 구성
 
@@ -26,7 +26,7 @@ raw 파일은 Git에서 제외합니다. PostgreSQL을 브라우저에 직접 �
 ## 파일
 
 ```text
-radar/                  Python CLI, 입력 계약, 태깅 검증
+radar/                  Python CLI, Cloudflare 일간 수집, 입력 계약, 태깅 검증
 schema.sql              새 전용 DB용 stage/core/mart 초기 스키마
 taxonomy.json           고정 태그 코드와 한국어 표시 이름
 tests/                  단위 테스트 + 선택적 PostgreSQL 통합 테스트
@@ -84,7 +84,7 @@ DB 미연결 시 안내 화면을 보여주며 실제 자료처럼 보이는 샘
 
 ## 외부 수집기의 입력 계약
 
-이 초안의 `ingest`는 Cloudflare API 원본 응답을 바로 받지 않습니다. 향후 수집기가 응답과 완료 메타데이터를 아래 계약으로 변환해야 합니다. API의 `description` 주석은 사이트 소개문이 아닙니다.
+이 초안의 `ingest`는 Cloudflare API 원본 응답을 바로 받지 않습니다. `collect-daily`가 일간 응답을 아래 계약으로 변환한 후 기존 `ingest`를 호출합니다. 주간 수집 adapter는 아직 없습니다. API의 `description` 주석은 사이트 소개문이 아닙니다.
 
 일간 POPULAR 예시:
 
@@ -170,9 +170,9 @@ uv run --env-file .env python -m radar import-tags detail-request.json detail-re
 
 ## 검증
 
-로컬에서 단위·배포 계약 검사 13개(Parquet 왕복·namespace·정적 PV 연결·Argo CD 수동 정책·전용 터널 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
+로컬에서 단위·배포 계약 검사 22개(Parquet 왕복·namespace·정적 PV 연결·Argo CD 수동 정책·전용 터널·일간 API 계약/실패 처리 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
 
-사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개**, GHCR 이미지 2개 `v0.1.0` 업로드 성공 및 raw PV/PVC의 `Bound` 상태를 확인했습니다. 이후 Kubernetes 초기화 Job의 `schema_ready`, 웹 Pod `1/1 Running`, ClusterIP의 `/api/ready` 응답 `ready=true`와 `/` HTTP 200도 확인했습니다. 웹은 최초 비밀번호 인증 오류 후 Secret 재입력·재시작 절차를 거쳐 준비 상태 검사를 통과했습니다. 터널 외부 접속·볼륨 파일 쓰기·순위/이력 화면 전체 검증·대량 적재 성능 검증 및 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다.
+사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개**, GHCR 이미지 2개 `v0.1.0` 업로드 성공 및 raw PV/PVC의 `Bound` 상태를 확인했습니다. 이후 Kubernetes 초기화 Job의 `schema_ready`, 웹 Pod `1/1 Running`, ClusterIP 및 `https://radar.selfronny.com`의 `/api/ready` 응답 `ready=true`와 `/` HTTP 200도 확인했습니다. 웹은 최초 비밀번호 인증 오류 후 Secret 재입력·재시작 절차를 거쳐 준비 상태 검사를 통과했습니다. 실제 PVC 파일 쓰기·순위/이력 화면 내용·대량 적재 성능 및 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다. 수집기 `v0.2.0` 이미지의 서버 빌드·실행 검증도 별도입니다.
 
 ```sh
 uv run python -m unittest discover -s tests -v
@@ -393,26 +393,99 @@ curl --fail-with-body --max-time 15 https://radar.selfronny.com/api/ready
 curl -sS --max-time 15 -o /dev/null -w 'Dashboard HTTP %{http_code}\n' https://radar.selfronny.com/
 ```
 
-### 7. 샘플 검증과 파이프라인 실행
+### 7. 첫 실데이터 수집 — 글로벌·한국 일간 Top 100
 
-샘플은 운영 DB가 아니라 별도 개발 DB에서 확인합니다. `pipeline-job.json`을 Git 제외 경로인 `k8s/local/`에 복사해 Secret 참조를 개발 DB 것으로 바꾸고 `args`를 `["demo"]`로 바꾸면 같은 Job 실행 절차로 샘플 적재를 검증할 수 있습니다. 실제 파일 적재는 PVC에 입력 파일을 준비한 뒤 `["ingest", "/data/input/snapshot.json"]`을 사용합니다. Job 입력 파일 배달과 실제 API 수집기는 아직 자동화하지 않았습니다.
+`collect-daily`는 공식 `/radar/ranking/top`의 `POPULAR` 데이터를 가져와 기존 raw Parquet → stage → core/mart 경로로 적재합니다. 첫 Job은 `WORLD`, `KR` 두 목록(관측 200행, 서로 겹치는 도메인은 core.domain에서 통합)을 대상으로 하며 주간 100만 도메인 적재가 아닙니다. 신규 의존성 없이 Python 표준 HTTP 라이브러리를 사용합니다.
+
+- 실행일을 관측일로 쓰지 않고 `result.meta.top_0.date`를 사용합니다. 첫 응답의 날짜로 나머지 국가 요청을 고정하고 다른 날짜로 대체된 응답은 거부합니다. `--date YYYY-MM-DD`로 정확한 원본 날짜를 지정할 수도 있습니다.
+- 첫 구현은 각 목록이 정확히 100행이고 순위가 1~100, 도메인이 중복되지 않는 경우만 적재합니다. 실제로 100개 미만을 제공하는 국가도 있을 수 있지만 완료 근거를 확인하기 전에는 받은 행 수로 기준을 낮추지 않습니다.
+- 요청한 목록을 모두 받아 검증하기 전에는 DB 적재를 시작하지 않습니다. HTTP 인증 오류·잘못된 응답은 중단합니다. 429/일부 5xx/연결 오류는 최대 3회 시도하며 30초를 넘는 Retry-After는 기다리는 대신 중단합니다. 자동 무한 재시도나 날짜 fallback은 없습니다.
+- raw에는 제공된 각 순위 행의 추가 필드(Cloudflare categories 포함)를 보존합니다. 원본 HTTP 봉투 전체를 복제하지는 않습니다. 응답의 변경 시각/전송 메타데이터는 해시에 넣지 않아 같은 날짜·내용의 재수집은 `already_published`로 처리할 수 있습니다. 기준일·location·endpoint·POPULAR 종류는 보존합니다. Cloudflare categories를 Gemini 태그로 기록하지 않습니다.
+- **DB 트랜잭션은 국가/목록별입니다.** 적재 도중 DB 오류가 나면 앞 목록은 완료됐을 수 있습니다. 상태를 확인하고 같은 날짜로 재실행하면 동일 내용은 중복 적재하지 않습니다. 이미 공개한 동일 날짜의 내용이 바뀌면 덮어쓰지 않고 중단합니다. 과거 backfill은 기존 구현처럼 시간 역순 삽입을 허용하지 않습니다.
+
+#### API 토큰과 Secret
+
+Cloudflare의 **Custom API Token → Account → Radar → Read** 권한을 사용합니다. Tunnel token, GHCR 토큰, Global API Key와 다릅니다. 웹과 터널에는 이 토큰을 주지 않습니다. Ubuntu에서 최초 한 번 등록합니다.
+
+```bash
+(
+  set +x
+  set -euo pipefail
+  IFS= read -r -s -p 'Cloudflare Radar API token: ' RADAR_API_TOKEN
+  printf '\n'
+  [ -n "$RADAR_API_TOKEN" ] || exit 1
+  printf '%s' "$RADAR_API_TOKEN" |
+    kubectl -n radar create secret generic radar-cloudflare-api --from-file=token=/dev/stdin
+  unset RADAR_API_TOKEN
+)
+kubectl -n radar get secret radar-cloudflare-api
+```
+
+#### 파이프라인 이미지만 새 태그로 빌드·등록
+
+Ubuntu 저장소에서 실행합니다. 웹 이미지는 변경하지 않으며 기존 `v0.1.0`도 덮어쓰지 않습니다.
+
+```bash
+git pull --ff-only
+docker build -f Dockerfile.pipeline -t ghcr.io/beolle/radar-project-pipeline:v0.2.0 .
+docker run --rm --read-only --tmpfs /tmp \
+  --mount "type=bind,src=$PWD/tests,dst=/tests,readonly" \
+  --entrypoint python ghcr.io/beolle/radar-project-pipeline:v0.2.0 \
+  -m unittest discover -s /tests -p test_cloudflare.py -v
+```
+
+빌드와 합성 API 검사 8개가 성공한 뒤, 기존 GHCR 쓰기 권한 로그인으로 업로드합니다.
+
+```bash
+docker push ghcr.io/beolle/radar-project-pipeline:v0.2.0
+```
+
+#### 수동 수집 Job과 적재 확인
+
+`k8s/collect-job.json`은 Argo CD 자동/수동 Sync 대상에서 제외했습니다. 아래 `create`를 한 번만 실행하고 실패·시간 초과 시 먼저 해당 Job을 확인합니다. 초기화 Job을 다시 실행하거나 demo 데이터를 운영 DB에 넣지 않습니다.
+
+```bash
+RADAR_COLLECT_JOB=$(kubectl -n radar create -f k8s/collect-job.json -o name) &&
+kubectl -n radar wait --for=condition=complete --timeout=180s "$RADAR_COLLECT_JOB"
+kubectl -n radar get "$RADAR_COLLECT_JOB"
+kubectl -n radar logs "$RADAR_COLLECT_JOB" --tail=80
+```
+
+출력의 날짜·location·rows·status·raw 경로를 확인합니다. `published` 또는 재실행의 `already_published`가 정상입니다. DB 확인은 조회만 합니다.
+
+```bash
+kubectl -n db exec -it pg-archive-postgresql-0 -- \
+  psql -X -U postgres -d radar -P pager=off -v ON_ERROR_STOP=1 \
+  -c "SELECT s.kind, s.period_date, s.location, count(o.domain_id) AS rows
+      FROM core.snapshot s LEFT JOIN core.observation o ON o.snapshot_id=s.id
+      GROUP BY s.id ORDER BY s.period_date DESC, s.location;"
+```
+
+화면은 [글로벌 일간](https://radar.selfronny.com/?kind=daily&location=WORLD) 또는 [한국 일간](https://radar.selfronny.com/?kind=daily&location=KR)을 선택합니다. 기본 화면의 주간 목록은 주간 수집 전까지 비어 있습니다. 첫 기준일은 비교 이력이 없으므로 변화 신호가 없고, Gemini 작업 전에는 미분류가 정상입니다. 자동 스케줄·전체 국가 탐색은 이 첫 실수집 검증 이후 연결합니다.
+
+로컬에서 환경변수를 안전하게 준비했다면 `uv run --env-file .env python -m radar collect-daily --locations WORLD KR --date YYYY-MM-DD`로도 실행할 수 있습니다. 실제 유효한 원본 날짜로 바꾸고 테스트 DB/운영 DB를 혼동하지 마세요.
+
+### 8. 샘플 검증과 파이프라인 실행
+
+샘플은 운영 DB가 아니라 별도 개발 DB에서 확인합니다. `pipeline-job.json`을 Git 제외 경로인 `k8s/local/`에 복사해 Secret 참조를 개발 DB 것으로 바꾸고 `args`를 `["demo"]`로 바꾸면 같은 Job 실행 절차로 샘플 적재를 검증할 수 있습니다. 실제 파일 적재는 PVC에 입력 파일을 준비한 뒤 `["ingest", "/data/input/snapshot.json"]`을 사용합니다. Job 입력 파일 배달과 정기 API 수집 스케줄은 아직 자동화하지 않았습니다.
 
 raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹에는 raw PVC를 연결하지 않습니다. 자원 설정(웹 512Mi, 파이프라인 4Gi 제한)과 Job 제한 시간 30분은 초안의 시작값이지 100만 도메인 처리 실측값이 아닙니다. 입력 전체를 메모리에 올리는 현재 구현은 전수 수집 전에 메모리·시간 실측이 필요합니다. 초기 Job은 하나씩 실행하며 실제 수집·태깅 worker가 완성된 후 중복 실행 방지와 공통 API 예산을 포함해 CronJob을 연결합니다.
 
 ## 개인 서버 배포 전 남은 작업
 
-1. 공식 API 표본에 맞춘 Cloudflare 수집 adapter 및 원본 기간·파일 완결성 검증
+1. 일간 수집기 실제 API·적재 검증, 국가 목록 탐색, 주간 bucket adapter와 원본 기간·파일 완결성 검증
 2. Gemini 실제 호출 adapter, 공통 일일 예산·재시도·작업 선점·초기 모집단 관리
 3. 지속 실행 스케줄, 장애 알림, DB 백업과 복구 확인
-4. 전용 터널 토큰 등록·공개 경로 실제 연결, 외부 HTTPS·화면 확인, 장비 기준 부하 검사
+4. 실제 수집 데이터의 외부 화면 확인, 장비 기준 부하 검사
 5. 사후 수정·과거 백필 시 영향받는 mart 재계산, 필요하면 별도 migration 체계
 
-로컬 npm dev/start는 localhost에만 바인딩하고 컨테이너에서는 Pod 네트워크를 위해 0.0.0.0으로 실행합니다. 공개 접속은 전용 Cloudflare Tunnel의 HTTPS 주소를 사용합니다. API 키·DB 비밀번호를 `NEXT_PUBLIC_*` 변수나 Git에 넣지 않습니다. `.env`와 data, node_modules, 가상환경은 `.gitignore`로 제외되고 Docker 빌드에서도 비밀정보를 제외합니다. Kubernetes 내부 웹 배포는 확인했고 전용 터널 연결은 아직 검증 전입니다.
+로컬 npm dev/start는 localhost에만 바인딩하고 컨테이너에서는 Pod 네트워크를 위해 0.0.0.0으로 실행합니다. 공개 접속은 전용 Cloudflare Tunnel의 HTTPS 주소를 사용합니다. API 키·DB 비밀번호를 `NEXT_PUBLIC_*` 변수나 Git에 넣지 않습니다. `.env`와 data, node_modules, 가상환경은 `.gitignore`로 제외되고 Docker 빌드에서도 비밀정보를 제외합니다. Kubernetes 내부 웹과 공개 HTTPS의 HTTP 응답까지 확인했으며 실제 데이터 화면 검증은 별도입니다.
 
 ## 출처
 
 - [Cloudflare Radar 순위 데이터](https://developers.cloudflare.com/radar/investigate/domain-ranking-datasets/)
 - [Cloudflare 순위 API](https://developers.cloudflare.com/api/resources/radar/subresources/ranking/methods/top/)
+- [Cloudflare Radar API 토큰 준비](https://developers.cloudflare.com/radar/get-started/first-request/)
 - [Gemini URL Context](https://ai.google.dev/gemini-api/docs/url-context)
 - [Gemini 사용량 한도](https://ai.google.dev/gemini-api/docs/rate-limits)
 - [Kubernetes Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/)

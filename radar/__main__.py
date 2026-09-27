@@ -215,6 +215,9 @@ def main():
     commands.add_parser("init-db", help="Create schema in the dedicated database")
     load = commands.add_parser("ingest", help="Import one complete source-contract JSON")
     load.add_argument("file", type=Path)
+    collect = commands.add_parser("collect-daily", help="Fetch and ingest complete Cloudflare POPULAR top-100 lists")
+    collect.add_argument("--locations", nargs="+", default=["WORLD", "KR"])
+    collect.add_argument("--date", help="Exact dataset date YYYY-MM-DD; default: latest returned by API")
     commands.add_parser("demo", help="Import small synthetic snapshots; no network calls")
     commands.add_parser("demo-input", help="Print a valid synthetic weekly source contract")
     prepare = commands.add_parser("prepare-tags", help="Print offline request draft; no API call")
@@ -232,6 +235,12 @@ def main():
         result = next(demo_snapshots())
     elif args.command == "ingest":
         result = ingest(json.loads(args.file.read_text()))
+    elif args.command == "collect-daily":
+        from .cloudflare import collect_daily
+        # Validate every requested list before publishing any of this collection.
+        payloads = collect_daily(args.locations, args.date)
+        result = [{"date": payload["date"], "location": payload["location"],
+                   "rows": 100, **ingest(payload)} for payload in payloads]
     elif args.command == "demo":
         result = [ingest(p) for p in demo_snapshots()]
     elif args.command == "prepare-tags":

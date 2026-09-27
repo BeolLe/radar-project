@@ -1,0 +1,27 @@
+{
+  "version": "v1",
+  "tags": {
+    "topic.it": "IT·개발", "topic.business": "비즈니스·경영",
+    "topic.finance": "금융·투자", "topic.shopping": "쇼핑·소비",
+    "topic.education": "교육·학습", "topic.news": "뉴스·시사",
+    "topic.games": "게임", "topic.entertainment": "영상·음악·엔터테인먼트",
+    "topic.design": "디자인·예술", "topic.travel": "여행·관광",
+    "topic.health": "건강·의료", "topic.sports": "스포츠·운동",
+    "topic.food": "음식·요리", "topic.property": "부동산·주거",
+    "topic.mobility": "자동차·교통·물류", "topic.career": "취업·커리어",
+    "topic.public": "법률·행정·공공", "topic.science": "과학·연구",
+    "topic.lifestyle": "생활·취미", "topic.society": "사회·문화",
+    "topic.adult": "성인 콘텐츠", "topic.gambling": "도박·베팅",
+    "use.ai": "AI 생성·보조", "use.search": "검색·정보탐색",
+    "use.read": "콘텐츠 열람·시청", "use.community": "커뮤니티·질문답변",
+    "use.social": "SNS·메신저", "use.commerce": "구매·판매",
+    "use.booking": "예약·중개", "use.learning": "학습·훈련",
+    "use.development": "개발·배포", "use.creation": "제작·편집",
+    "use.collaboration": "문서·업무협업", "use.analytics": "데이터 분석·자동화",
+    "use.finance": "결제·금융거래", "use.storage": "파일 저장·공유",
+    "use.security": "보안·개인정보 보호", "use.recruiting": "채용·구직",
+    "role.site": "사용자용 사이트·앱", "role.api": "API·백엔드",
+    "role.delivery": "CDN·정적 리소스", "role.adtech": "광고·측정",
+    "role.integration": "인증·서비스 연동", "role.parked": "주차·판매 도메인"
+  }
+}

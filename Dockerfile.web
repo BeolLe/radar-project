@@ -1,0 +1,20 @@
+FROM node:22-bookworm-slim AS build
+ENV NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+COPY taxonomy.json /app/taxonomy.json
+RUN npm run build && npm prune --omit=dev
+
+FROM node:22-bookworm-slim
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+WORKDIR /app/web
+COPY --from=build --chown=node:node /app/web/package.json ./
+COPY --from=build --chown=node:node /app/web/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/web/.next ./.next
+COPY --from=build --chown=node:node /app/web/next.config.mjs ./
+COPY --from=build --chown=node:node /app/taxonomy.json /app/taxonomy.json
+USER node
+EXPOSE 3000
+CMD ["node", "node_modules/next/dist/bin/next", "start", "--hostname", "0.0.0.0", "--port", "3000"]

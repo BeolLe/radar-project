@@ -1,0 +1,9 @@
+{
+  "apiVersion": "v1",
+  "kind": "PersistentVolumeClaim",
+  "metadata": {"name": "radar-raw", "namespace": "radar-project"},
+  "spec": {
+    "accessModes": ["ReadWriteOnce"],
+    "resources": {"requests": {"storage": "10Gi"}}
+  }
+}

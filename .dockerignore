@@ -1,0 +1,16 @@
+.git
+**/.env*
+**/.venv
+**/node_modules
+**/.next
+**/__pycache__
+**/*.tsbuildinfo
+**/*.log
+**/*.parquet
+**/*-request.json
+**/*-response.json
+data
+demo-input.json
+secrets
+k8s/local
+.DS_Store

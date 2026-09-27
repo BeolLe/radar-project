@@ -1,0 +1,9 @@
+[project]
+name = "radar-project"
+version = "0.1.0"
+description = "Cloudflare Radar domain history and two-pass AI tagging draft"
+requires-python = ">=3.12"
+dependencies = ["psycopg[binary]>=3.2,<4", "pyarrow>=19,<26"]
+
+[tool.uv]
+package = false

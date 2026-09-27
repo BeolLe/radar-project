@@ -1,0 +1,245 @@
+"""Run with uv run --env-file .env python -m radar --help."""
+import argparse
+from datetime import date
+import hashlib
+import json
+import os
+from pathlib import Path
+import tempfile
+
+from .domain import BUCKETS, previous_date, validate_snapshot
+from .tagging import LIMITS, MODEL, make_request, validate_results
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def connect():
+    import psycopg
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise ValueError("Set DATABASE_URL to a dedicated local/test PostgreSQL database")
+    return psycopg.connect(url, autocommit=True)
+
+
+def digest(payload) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False,
+                                     allow_nan=False).encode()).hexdigest()
+
+
+def archive(payload: dict, batch: str) -> Path:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    directory = Path(os.environ.get("RADAR_DATA_DIR", "data")) / "raw"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / f"{batch}.parquet"
+    if target.exists():
+        if pq.read_schema(target).metadata.get(b"batch_hash") != batch.encode():
+            raise ValueError("Existing raw file metadata mismatch")
+        return target
+    # ponytail: materializes one input snapshot; use streaming Arrow batches for larger sources.
+    rows = [{"source_id": source["id"], "bucket": source.get("bucket"),
+             "payload": json.dumps(row, ensure_ascii=False)}
+            for source in payload["sources"] for row in source["rows"]]
+    table = pa.Table.from_pylist(rows)
+    metadata = {**payload, "sources": [{k: v for k, v in s.items() if k != "rows"}
+                                       for s in payload["sources"]]}
+    table = table.replace_schema_metadata({b"batch_hash": batch.encode(),
+                                           b"source_metadata": json.dumps(metadata).encode()})
+    with tempfile.NamedTemporaryFile(dir=directory, suffix=".parquet", delete=False) as f:
+        temporary = Path(f.name)
+    try:
+        pq.write_table(table, temporary, compression="zstd")
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return target
+
+
+def ingest(payload: dict) -> dict:
+    from psycopg.types.json import Jsonb
+    validate_snapshot(payload)
+    batch = digest(payload)
+    raw = archive(payload, batch)
+    # Stage is reconstructed from raw Parquet, not from an in-memory alternate path.
+    meta, rows, _ = validate_snapshot(read_archive(raw, batch))
+    with connect() as conn:
+        # ponytail: one ingestion writer for this draft; partition locks by stream if needed.
+        conn.execute("SELECT pg_advisory_lock(73194201)")
+        existing = conn.execute("SELECT id, batch_hash FROM core.snapshot "
+                                "WHERE kind=%s AND period_date=%s AND location=%s",
+                                (meta["kind"], meta["date"], meta["location"])).fetchone()
+        if existing:
+            if existing[1] != batch:
+                raise ValueError("Revision detected: draft refuses to overwrite a published period")
+            return {"snapshot_id": existing[0], "status": "already_published"}
+        latest = conn.execute("SELECT max(period_date) FROM core.snapshot WHERE kind=%s AND location=%s",
+                              (meta["kind"], meta["location"])).fetchone()[0]
+        if latest and meta["date"] < latest:
+            raise ValueError("Load periods chronologically; historical mart rebuild is not implemented")
+        # Stage commits first. A failed publish retains its raw file and staging rows.
+        with conn.transaction():
+            conn.execute("DELETE FROM stage.observation WHERE batch_hash=%s", (batch,))
+            with conn.cursor().copy("COPY stage.observation FROM STDIN") as copy:
+                for n, row in enumerate(rows):
+                    copy.write_row((batch, n, row["source_id"], row["domain"], row["value"]))
+        with conn.transaction():
+            snapshot_id = conn.execute(
+                "INSERT INTO core.snapshot (kind,period_date,location,batch_hash,raw_path,source_ids) "
+                "VALUES (%s,%s,%s,%s,%s,%s) RETURNING id",
+                (meta["kind"], meta["date"], meta["location"], batch, str(raw),
+                 Jsonb(meta["source_ids"]))
+            ).fetchone()[0]
+            conn.execute("INSERT INTO core.domain(name) SELECT DISTINCT domain FROM stage.observation "
+                         "WHERE batch_hash=%s ON CONFLICT (name) DO NOTHING", (batch,))
+            conn.execute("INSERT INTO core.observation SELECT %s,d.id,min(s.value) "
+                         "FROM stage.observation s JOIN core.domain d ON d.name=s.domain "
+                         "WHERE s.batch_hash=%s GROUP BY d.id", (snapshot_id, batch))
+            previous = conn.execute("SELECT id FROM core.snapshot WHERE kind=%s AND location=%s "
+                                    "AND period_date=%s",
+                                    (meta["kind"], meta["location"], previous_date(meta))).fetchone()
+            if previous:
+                build_signals(conn, snapshot_id, previous[0], meta)
+            conn.execute("DELETE FROM stage.observation WHERE batch_hash=%s", (batch,))
+    return {"snapshot_id": snapshot_id, "status": "published", "raw": str(raw)}
+
+
+def build_signals(conn, current: int, previous: int, meta: dict):
+    conn.execute("""
+      INSERT INTO mart.domain_signal(snapshot_id,domain_id,signal)
+      SELECT %s,c.domain_id, CASE WHEN EXISTS (
+        SELECT 1 FROM core.observation o JOIN core.snapshot s ON s.id=o.snapshot_id
+        WHERE o.domain_id=c.domain_id AND s.kind=%s AND s.location=%s AND s.period_date<%s
+      ) THEN 'reentry' ELSE 'first_seen' END
+      FROM core.observation c LEFT JOIN core.observation p
+        ON p.snapshot_id=%s AND p.domain_id=c.domain_id
+      WHERE c.snapshot_id=%s AND p.domain_id IS NULL
+    """, (current, meta["kind"], meta["location"], meta["date"], previous, current))
+    conn.execute("""
+      INSERT INTO mart.domain_signal(snapshot_id,domain_id,signal)
+      SELECT %s,c.domain_id,'improved' FROM core.observation c JOIN core.observation p
+        ON p.domain_id=c.domain_id AND p.snapshot_id=%s
+      WHERE c.snapshot_id=%s AND c.value<p.value
+    """, (current, previous, current))
+    conn.execute("""
+      INSERT INTO mart.domain_signal(snapshot_id,domain_id,signal)
+      SELECT %s,c.domain_id,'consecutive_improvement' FROM mart.domain_signal c
+      JOIN mart.domain_signal p ON p.domain_id=c.domain_id AND p.snapshot_id=%s
+      WHERE c.snapshot_id=%s AND c.signal='improved' AND p.signal='improved'
+    """, (current, previous, current))
+
+
+def prepare_tags(phase: str, limit: int) -> dict:
+    if not 1 <= limit <= LIMITS[phase]:
+        raise ValueError(f"Limit for {phase} must be 1..{LIMITS[phase]}")
+    with connect() as conn:
+        # Unknown attempts are not silently retried forever. They need explicit later review.
+        rows = conn.execute("""
+          SELECT d.id,d.name FROM core.domain d WHERE NOT EXISTS (
+            SELECT 1 FROM core.tag_result t WHERE t.domain_id=d.id AND t.phase=%s
+          ) ORDER BY d.id LIMIT %s
+        """, (phase, limit)).fetchall()
+    if not rows:
+        return {"phase": phase, "domains": [], "status": "no_candidates"}
+    return make_request(phase, [{"domain_id": row[0], "domain": row[1],
+                                "url": "https://" + row[1]} for row in rows])
+
+
+def import_tags(request: dict, envelope: dict) -> dict:
+    from psycopg.types.json import Jsonb
+    if (request.get("model") != MODEL or request.get("taxonomy_version") != "v1"
+            or request.get("prompt_version") != "v1"):
+        raise ValueError("Unsupported model or schema version")
+    make_request(request["phase"], request["domains"])
+    rows = validate_results(request, envelope)
+    with connect() as conn, conn.transaction():
+        for domain in request["domains"]:
+            found = conn.execute("SELECT name FROM core.domain WHERE id=%s",
+                                 (domain["domain_id"],)).fetchone()
+            if not found or found[0] != domain["domain"]:
+                raise ValueError("Request domain mapping does not match this database")
+        for row in rows:
+            result_hash = digest({"request": request, "result": {
+                **row, "checked_at": row["checked_at"].isoformat()}})
+            conn.execute("""
+              INSERT INTO core.tag_result
+                (domain_id,phase,status,model,prompt_version,taxonomy_version,tags,evidence,
+                 checked_at,result_hash)
+              VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+              ON CONFLICT (result_hash) DO NOTHING
+            """, (row["domain_id"], request["phase"], row["status"], request["model"],
+                  request["prompt_version"], request["taxonomy_version"], Jsonb(row["tags"]),
+                  Jsonb({"tool": row["evidence"], "reason": row.get("reason", "")}),
+                  row["checked_at"], result_hash))
+    return {"validated_results": len(rows), "missing_ids": sorted(
+        {d["domain_id"] for d in request["domains"]} - {r["domain_id"] for r in rows})}
+
+
+def read_archive(path: Path, expected_hash: str) -> dict:
+    import pyarrow.parquet as pq
+    table = pq.read_table(path)
+    payload = json.loads(table.schema.metadata[b"source_metadata"])
+    by_id = {source["id"]: source for source in payload["sources"]}
+    for source in by_id.values():
+        source["rows"] = []
+    for row in table.to_pylist():
+        by_id[row["source_id"]]["rows"].append(json.loads(row["payload"]))
+    if digest(payload) != expected_hash:
+        raise ValueError("Raw Parquet content hash mismatch")
+    return payload
+
+
+def demo_snapshots():
+    """Reserved .example domains only; no real Cloudflare data or AI claims."""
+    weeks = [
+        {"alpha.example": 500000, "beta.example": 100000, "return.example": 1000000},
+        {"alpha.example": 200000, "beta.example": 100000, "new.example": 1000000},
+        {"alpha.example": 100000, "beta.example": 100000, "return.example": 500000},
+    ]
+    for day, values in zip(("2026-01-05", "2026-01-12", "2026-01-19"), weeks):
+        sources = []
+        for bound in BUCKETS:
+            rows = [{"domain": d} for d, b in values.items() if b <= bound]
+            sources.append({"id": f"demo-{day}-{bound}", "bucket": bound,
+                            "expected_rows": len(rows), "rows": rows})
+        yield {"kind": "weekly", "date": day, "location": "WORLD", "sources": sources}
+    for location in ("KR", "JP"):
+        yield {"kind": "daily", "date": "2026-01-19", "location": location,
+               "sources": [{"id": f"demo-{location}", "expected_rows": 2,
+                            "rows": [{"domain": "alpha.example", "rank": 1},
+                                     {"domain": "beta.example", "rank": 2}]}]}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("init-db", help="Create schema in the dedicated database")
+    load = commands.add_parser("ingest", help="Import one complete source-contract JSON")
+    load.add_argument("file", type=Path)
+    commands.add_parser("demo", help="Import small synthetic snapshots; no network calls")
+    commands.add_parser("demo-input", help="Print a valid synthetic weekly source contract")
+    prepare = commands.add_parser("prepare-tags", help="Print offline request draft; no API call")
+    prepare.add_argument("--phase", choices=LIMITS, required=True)
+    prepare.add_argument("--limit", type=int)
+    load_tags = commands.add_parser("import-tags", help="Import an adapter-normalized response")
+    load_tags.add_argument("request", type=Path)
+    load_tags.add_argument("response", type=Path)
+    args = parser.parse_args()
+    if args.command == "init-db":
+        with connect() as conn, conn.transaction():
+            conn.execute((ROOT / "schema.sql").read_text())
+        result = {"status": "schema_ready"}
+    elif args.command == "demo-input":
+        result = next(demo_snapshots())
+    elif args.command == "ingest":
+        result = ingest(json.loads(args.file.read_text()))
+    elif args.command == "demo":
+        result = [ingest(p) for p in demo_snapshots()]
+    elif args.command == "prepare-tags":
+        result = prepare_tags(args.phase, args.limit or LIMITS[args.phase])
+    else:
+        result = import_tags(json.loads(args.request.read_text()), json.loads(args.response.read_text()))
+    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+if __name__ == "__main__":
+    main()

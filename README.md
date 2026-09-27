@@ -21,7 +21,7 @@ Cloudflare Radar 도메인 순위 이력을 누적하고, 변화 신호와 Gemin
 
 raw 파일은 Git에서 제외합니다. PostgreSQL을 브라우저에 직접 노출하지 않습니다. 기존 다른 프로젝트의 DB·수집 작업은 사용하거나 변경하지 않습니다.
 
-배포 대상은 **Ubuntu 24.04의 Kubernetes**이며 웹·파이프라인 모두 Pod에서 실행합니다. 기존 PostgreSQL을 사용합니다. Git 저장소는 [BeolLe/radar-project](https://github.com/BeolLe/radar-project)입니다. 서버 배포는 아래 Kubernetes 절을 따르고, Docker Compose는 로컬 개발용으로만 사용합니다.
+배포 대상은 **Ubuntu 24.04의 Kubernetes, namespace `radar`**이며 웹·파이프라인 모두 Pod에서 실행합니다. 기존 PostgreSQL을 사용합니다. Git 저장소는 [BeolLe/radar-project](https://github.com/BeolLe/radar-project)입니다. GHCR에 이미지를 보관하고 **Argo CD 수동 Sync**로 웹을 배포합니다. 서버 배포는 아래 Kubernetes 절을 따르고, Docker Compose는 로컬 개발용으로만 사용합니다.
 
 ## 파일
 
@@ -35,6 +35,7 @@ compose.yaml            로컬 개발 PostgreSQL만 실행하는 선택 사항
 Dockerfile.web          Next.js 컨테이너 이미지
 Dockerfile.pipeline     Python CLI 컨테이너 이미지
 k8s/                    웹 Deployment/Service, raw PVC, 별도 수동 Job
+argocd/application.json  radar Application 등록용; 자동 동기화 없음
 .env.example            비밀정보 없는 환경변수 예시
 ```
 
@@ -169,7 +170,9 @@ uv run --env-file .env python -m radar import-tags detail-request.json detail-re
 
 ## 검증
 
-초안 작성 환경에서 단위·배포 계약 검사 10개(Parquet 왕복 포함), Next.js 타입 검사·프로덕션 빌드, `kubectl kustomize k8s` 렌더링을 통과했습니다. 이는 실제 컨테이너·클러스터 검증과 다릅니다. Docker가 실행되지 않아 이미지 빌드·PostgreSQL 통합 검사는 미실행이며, 실제 Cloudflare·Gemini API 호출도 수행하지 않았습니다.
+로컬에서 단위·배포 계약 검사 11개(Parquet 왕복·namespace·Argo CD 수동 정책 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
+
+사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개, 조회 전용 계정으로 웹 `/api/ready`의 `ready=true`**를 확인했습니다. 이 결과는 실제 Kubernetes 배포·순위/이력 화면 전체 검증·대량 적재 성능 검증을 의미하지 않습니다. GHCR 업로드 완료 및 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다.
 
 ```sh
 uv run python -m unittest discover -s tests -v
@@ -187,9 +190,11 @@ RADAR_TEST_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:PORT/radar_test' \
 
 통합 검사는 raw Parquet, 관측 행 수, 재실행, 변화 신호, revision 거부, 태그 상세 결과 우선순위를 확인합니다. DB 변수가 없으면 이 검사만 skip됩니다.
 
-## Kubernetes 배포 — Git으로 가져와 실행
+## Kubernetes 배포 — GHCR + Argo CD 수동 Sync
 
-**이 절의 명령은 서버에서 사용자가 실행할 절차입니다. 코드 업로드만으로 배포되지는 않습니다.** GitHub Actions, 원격 자동 배포, 실제 수집 CronJob은 추가하지 않았습니다. JSON은 Kubernetes가 기본 지원하는 manifest 형식이며 별도 변환 없이 적용할 수 있습니다.
+**이 절의 명령은 서버에서 사용자가 실행할 절차입니다. 코드 업로드만으로 배포되지는 않습니다.** Application은 기존 Argo CD의 `argocd` namespace에 등록하고 앱 리소스는 `radar` namespace에 둡니다. 자동 동기화·자동 삭제·self-heal·이미지 자동 갱신은 설정하지 않았습니다. GitHub Actions와 실제 수집 CronJob도 아직 없습니다. JSON은 Kubernetes가 기본 지원하는 manifest 형식입니다.
+
+**첫 Sync 전 준비:** GHCR 이미지와 pull 권한, DB·조회 권한, `radar` namespace의 Secret, 실제 서버에 맞춘 PV/PVC가 모두 필요합니다. 현재 서버에는 StorageClass가 없으므로 아래 기본 PVC 예시를 그대로 Sync하지 않습니다. 정적 PV 연결 방식·보관 경로를 먼저 확정해야 합니다. 예전 `radar-project` namespace에 리소스를 이미 배포했다면 이름 변경은 데이터 이전이 아니므로 별도 이전 계획 없이 기존 namespace/PVC를 삭제하지 않습니다.
 
 ### 1. 서버에서 코드 받기와 사전 확인
 
@@ -238,7 +243,7 @@ docker push ghcr.io/beolle/radar-project-pipeline:v0.1.0
 docker push ghcr.io/beolle/radar-project-web:v0.1.0
 ```
 
-이 이미지들은 코드 작성 시점에 빌드·등록하지 않았습니다. GHCR 대신 기존 registry를 사용해도 되며 그때는 두 manifest의 image 주소도 바꿉니다. Git 저장소 공개 여부와 GHCR 패키지 공개 여부는 별개입니다. 이미지를 공개로 설정하거나 Pod의 `imagePullSecrets`에 해당 registry의 읽기 자격증명을 연결해야 합니다. 토큰은 Dockerfile, build argument, Git에 넣지 마세요.
+Ubuntu에서 검증한 `radar-pipeline:test`, `radar-web:test`가 남아 있고 앱 코드·Dockerfile이 같으면 재빌드 대신 해당 이미지에 위 GHCR 태그를 붙여 push해도 됩니다. Kubernetes namespace와 Argo CD 설정만 바꾼 경우에는 앱 이미지 재빌드가 필요하지 않습니다. Git 저장소 공개 여부와 GHCR 패키지 공개 여부는 별개입니다. 이미지를 공개로 설정하거나 Pod의 `imagePullSecrets`에 해당 registry의 읽기 자격증명을 연결해야 합니다. 토큰은 Dockerfile, build argument, Git에 넣지 마세요.
 
 업데이트 때는 `git pull --ff-only` 후 **새 태그**로 빌드·등록하고 manifest의 태그도 바꿉니다. 이미 배포한 `v0.1.0`을 덮어쓰지 않습니다. 되돌릴 때는 이전 이미지 태그로 복구하되 DB 스키마 변경의 호환성은 별도로 확인합니다.
 
@@ -252,12 +257,12 @@ kubectl apply -f k8s/namespace.json
 
 ```sh
 chmod 600 /secure/path/radar-pipeline.env /secure/path/radar-web.env
-kubectl -n radar-project create secret generic radar-pipeline-db --from-env-file=/secure/path/radar-pipeline.env
-kubectl -n radar-project create secret generic radar-web-db --from-env-file=/secure/path/radar-web.env
+kubectl -n radar create secret generic radar-pipeline-db --from-env-file=/secure/path/radar-pipeline.env
+kubectl -n radar create secret generic radar-web-db --from-env-file=/secure/path/radar-web.env
 kubectl apply -f k8s/storage.json
 ```
 
-`k8s/storage.json`은 기본 StorageClass를 사용하는 **10Gi 시험용 PVC 예시**입니다. 1년 보관 용량 산정치가 아닙니다. 기본 클래스가 없으면 `spec.storageClassName`을 지정합니다. 운영 스토리지, 확장·백업·reclaim policy를 확인하고 크기를 정하세요. `WaitForFirstConsumer` 클래스라면 Job이 배치되기 전 Pending인 것은 정상일 수 있습니다. Job 삭제와 달리 PVC·namespace 삭제는 raw 자료 손실로 이어질 수 있으므로 초기화 명령처럼 사용하지 않습니다.
+`k8s/storage.json`은 기본 StorageClass를 사용하는 **10Gi 시험용 PVC 예시**입니다. 1년 보관 용량 산정치가 아닙니다. 동적 생성 환경에서는 사용할 StorageClass를 지정하고, 현재 서버처럼 정적 PV를 쓰는 환경에서는 새 Radar 전용 PV와 PVC의 class·접근 모드·용량·연결 대상을 맞춥니다. 기존 PostgreSQL이나 다른 프로젝트의 PV를 재사용하지 않습니다. 운영 스토리지, 확장·백업·reclaim policy를 확인하고 크기를 정하세요. `WaitForFirstConsumer` 클래스라면 Job이 배치되기 전 Pending인 것은 정상일 수 있습니다. Job 삭제와 달리 PVC·namespace 삭제는 raw 자료 손실로 이어질 수 있으므로 초기화 명령처럼 사용하지 않습니다.
 
 Secret은 저장소 밖에 둔다는 것만으로 안전이 완성되지 않습니다. 클러스터의 RBAC·저장 시 암호화 정책도 확인해야 합니다. 웹에는 API 키·쓰기 DB 계정을 전달하지 않습니다.
 
@@ -267,17 +272,29 @@ Secret은 저장소 밖에 둔다는 것만으로 안전이 완성되지 않습�
 
 ```sh
 RADAR_JOB=$(kubectl create -f k8s/pipeline-job.json -o name)
-kubectl -n radar-project wait --for=condition=complete --timeout=1800s "$RADAR_JOB"
-kubectl -n radar-project logs "$RADAR_JOB"
+kubectl -n radar wait --for=condition=complete --timeout=1800s "$RADAR_JOB"
+kubectl -n radar logs "$RADAR_JOB"
 ```
 
-완료 후 2절의 reader 조회 권한을 부여하고 웹을 적용합니다.
+완료 후 2절의 reader 조회 권한을 부여합니다. 초기화 Job은 `k8s/kustomization.yaml`에 포함하지 않았으므로 웹 Sync가 DB 초기화를 실행하지 않습니다. 이미 초기화한 테스트 DB를 그대로 검증할 때는 init-db를 다시 실행할 필요가 없습니다.
+
+준비가 끝나면 기존 클러스터에서 **Application 등록 파일만** 적용합니다. 별도 GitOps 저장소나 기존 root-apps는 변경하지 않습니다.
 
 ```sh
-kubectl apply -k k8s
-kubectl -n radar-project rollout status deployment/radar-web --timeout=180s
-kubectl -n radar-project port-forward service/radar-web 3000:80
+kubectl apply -f argocd/application.json
+kubectl -n argocd get application radar
 ```
+
+이 등록만으로 웹은 배포되지 않습니다. Argo CD 화면에서 `radar`의 대상이 `radar-project.git` / `main` / `k8s`, destination namespace가 `radar`인지 확인합니다. Diff를 검토한 뒤 **수동 Sync**를 실행하며 Prune는 선택하지 않습니다. Application에 자동 동기화 정책과 cascade 삭제 finalizer를 넣지 않았습니다. 다만 UI에서 명시적으로 cascade 삭제나 prune를 선택하면 삭제될 수 있으므로 별도 주의가 필요합니다.
+
+Sync 이후 확인:
+
+```sh
+kubectl -n radar rollout status deployment/radar-web --timeout=180s
+kubectl -n radar port-forward service/radar-web 3000:80
+```
+
+이후 배포 변경은 Git에 반영하고 수동 Sync로 적용합니다. 정상 운영에서 같은 웹 리소스를 Argo CD와 `kubectl apply -k k8s`로 번갈아 수정하지 않습니다. 등록한 Application 자체는 별도 bootstrap 파일이므로 해당 파일 변경은 다시 apply해야 합니다.
 
 port-forward를 실행한 컴퓨터의 `http://127.0.0.1:3000`에서 확인합니다. 원격 Ubuntu에서 실행했다면 Mac/모바일의 localhost가 아닙니다. 원격 확인에는 SSH 포워딩이나 기존 접속 경로가 추가로 필요합니다. 이 초안은 ClusterIP까지만 제공하며 Ingress·도메인·HTTPS·외부 공개 경로는 아직 만들지 않았습니다.
 
@@ -297,7 +314,7 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 4. 전용 DB 읽기 계정 실제 설정, HTTPS·공개 경로·접근 정책, 장비 기준 부하 검사
 5. 사후 수정·과거 백필 시 영향받는 mart 재계산, 필요하면 별도 migration 체계
 
-로컬 npm dev/start는 localhost에만 바인딩하고 컨테이너에서는 Pod 네트워크를 위해 0.0.0.0으로 실행합니다. 외부 공개 시에는 HTTPS reverse proxy/Ingress 뒤에서 실행하세요. API 키·DB 비밀번호를 `NEXT_PUBLIC_*` 변수나 Git에 넣지 않습니다. `.env`와 data, node_modules, 가상환경은 `.gitignore`로 제외되고 Docker 빌드에서도 비밀정보를 제외합니다. 이 저장소의 코드는 개인 서버에 설치·배포한 상태가 아닙니다.
+로컬 npm dev/start는 localhost에만 바인딩하고 컨테이너에서는 Pod 네트워크를 위해 0.0.0.0으로 실행합니다. 외부 공개 시에는 HTTPS reverse proxy/Ingress 뒤에서 실행하세요. API 키·DB 비밀번호를 `NEXT_PUBLIC_*` 변수나 Git에 넣지 않습니다. `.env`와 data, node_modules, 가상환경은 `.gitignore`로 제외되고 Docker 빌드에서도 비밀정보를 제외합니다. Ubuntu의 일시적인 Docker 테스트 실행과 Kubernetes 운영 배포는 별개이며, 후자는 아직 확인하지 않았습니다.
 
 ## 출처
 
@@ -308,5 +325,7 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 - [Kubernetes Job](https://kubernetes.io/docs/concepts/workloads/controllers/job/)
 - [Kubernetes Secret](https://kubernetes.io/docs/concepts/configuration/secret/)
 - [uv Docker 연동](https://docs.astral.sh/uv/guides/integration/docker/)
+- [Argo CD Application 명세](https://argo-cd.readthedocs.io/en/stable/user-guide/application-specification/)
+- [Argo CD 자동 동기화 정책](https://argo-cd.readthedocs.io/en/stable/user-guide/auto_sync/)
 
 Cloudflare 데이터를 공개할 때는 해당 데이터 이용 조건과 출처 표시를 유지해야 합니다. 저장소에는 제3자 원본 데이터나 실제 API 응답을 포함하지 않습니다.

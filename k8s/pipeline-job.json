@@ -1,7 +1,7 @@
 {
   "apiVersion": "batch/v1",
   "kind": "Job",
-  "metadata": {"generateName": "radar-init-db-", "namespace": "radar-project"},
+  "metadata": {"generateName": "radar-init-db-", "namespace": "radar"},
   "spec": {
     "backoffLimit": 0,
     "activeDeadlineSeconds": 1800,

@@ -11,6 +11,10 @@ class DeploymentTests(unittest.TestCase):
         web, service = json.loads((ROOT / "k8s/web.json").read_text())["items"]
         job = json.loads((ROOT / "k8s/pipeline-job.json").read_text())
         storage = json.loads((ROOT / "k8s/storage.json").read_text())
+        namespace = json.loads((ROOT / "k8s/namespace.json").read_text())
+        self.assertEqual(namespace["metadata"]["name"], "radar")
+        for resource in (web, service, job, storage):
+            self.assertEqual(resource["metadata"]["namespace"], "radar")
         self.assertEqual(service["spec"]["type"], "ClusterIP")
         self.assertEqual(service["spec"]["selector"], web["spec"]["template"]["metadata"]["labels"])
         pods = [w["spec"]["template"]["spec"] for w in (web, job)]
@@ -28,6 +32,24 @@ class DeploymentTests(unittest.TestCase):
         self.assertNotIn("pipeline-job.json", (ROOT / "k8s/kustomization.yaml").read_text())
         readiness = pods[0]["containers"][0]["readinessProbe"]["httpGet"]["path"]
         self.assertTrue((ROOT / "web/app" / readiness.lstrip("/") / "route.ts").is_file())
+
+    def test_argocd_is_manual_and_scoped(self):
+        app = json.loads((ROOT / "argocd/application.json").read_text())
+        self.assertEqual(app["metadata"], {"name": "radar", "namespace": "argocd"})
+        spec = app["spec"]
+        self.assertEqual(spec["project"], "default")
+        self.assertEqual(spec["source"], {
+            "repoURL": "https://github.com/BeolLe/radar-project.git",
+            "targetRevision": "main", "path": "k8s",
+        })
+        self.assertEqual(spec["destination"], {
+            "server": "https://kubernetes.default.svc", "namespace": "radar",
+        })
+        self.assertEqual(spec["syncPolicy"], {})
+        self.assertNotIn("operation", app)
+        resources = (ROOT / spec["source"]["path"] / "kustomization.yaml").read_text()
+        self.assertNotIn("argocd", resources)
+        self.assertNotIn("pipeline-job.json", resources)
 
     def test_build_context_excludes_secrets(self):
         excluded = (ROOT / ".dockerignore").read_text().splitlines()

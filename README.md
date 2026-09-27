@@ -172,7 +172,7 @@ uv run --env-file .env python -m radar import-tags detail-request.json detail-re
 
 로컬에서 단위·배포 계약 검사 12개(Parquet 왕복·namespace·정적 PV 연결·Argo CD 수동 정책 포함)와 `kubectl kustomize k8s` 렌더링을 확인합니다. Next.js 타입 검사·프로덕션 빌드는 기존 초안에서 통과했습니다.
 
-사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개, 조회 전용 계정으로 웹 `/api/ready`의 `ready=true`**를 확인했습니다. 이 결과는 실제 Kubernetes 배포·순위/이력 화면 전체 검증·대량 적재 성능 검증을 의미하지 않습니다. GHCR 업로드 완료 및 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다.
+사용자 제공 Ubuntu 실행 로그에서 **컨테이너 이미지 2개 빌드, 단위 검사 8개, `radar_test` DB 통합 검사 1개, 조회 전용 계정으로 웹 `/api/ready`의 `ready=true`**, GHCR 이미지 2개 `v0.1.0` 업로드 성공 및 raw PV/PVC의 `Bound` 상태를 확인했습니다. 이 결과는 실제 Kubernetes 이미지 다운로드·볼륨 파일 쓰기·순위/이력 화면 전체 검증·대량 적재 성능 검증을 의미하지 않습니다. 실제 Cloudflare·Gemini API 호출은 아직 확인하지 않았습니다.
 
 ```sh
 uv run python -m unittest discover -s tests -v
@@ -243,7 +243,30 @@ docker push ghcr.io/beolle/radar-project-pipeline:v0.1.0
 docker push ghcr.io/beolle/radar-project-web:v0.1.0
 ```
 
-Ubuntu에서 검증한 `radar-pipeline:test`, `radar-web:test`가 남아 있고 앱 코드·Dockerfile이 같으면 재빌드 대신 해당 이미지에 위 GHCR 태그를 붙여 push해도 됩니다. Kubernetes namespace와 Argo CD 설정만 바꾼 경우에는 앱 이미지 재빌드가 필요하지 않습니다. Git 저장소 공개 여부와 GHCR 패키지 공개 여부는 별개입니다. 이미지를 공개로 설정하거나 Pod의 `imagePullSecrets`에 해당 registry의 읽기 자격증명을 연결해야 합니다. 토큰은 Dockerfile, build argument, Git에 넣지 마세요.
+Ubuntu에서 검증한 `radar-pipeline:test`, `radar-web:test`가 남아 있고 앱 코드·Dockerfile이 같으면 재빌드 대신 해당 이미지에 위 GHCR 태그를 붙여 push해도 됩니다. Kubernetes namespace와 Argo CD 설정만 바꾼 경우에는 앱 이미지 재빌드가 필요하지 않습니다. Git 저장소 공개 여부와 GHCR 패키지 공개 여부는 별개입니다. **Radar 이미지는 비공개로 운영하며**, 웹과 파이프라인의 `imagePullSecrets`는 namespace `radar`의 `radar-ghcr` Secret을 참조합니다. 실제 두 패키지의 visibility가 `Private`인지 GitHub에서 확인하세요. 이미 공개한 패키지는 비공개로 되돌릴 수 없으므로 별도 대응이 필요합니다. 토큰은 Dockerfile, build argument, Git에 넣지 마세요.
+
+#### 비공개 이미지 다운로드 자격증명 준비
+
+BeolLe 계정의 Personal access token **(classic)**을 별도로 만들고 `read:packages` 권한만 부여합니다. 이 토큰에 두 패키지의 읽기 권한이 있어야 합니다. 다운로드 전용이므로 `write:packages`는 필요하지 않습니다. 만료 전에 토큰과 Secret을 교체해야 하며, 서버의 기존 `docker login` 정보가 Kubernetes에 자동 전달되지는 않습니다.
+
+아래는 namespace `radar`가 준비된 **Ubuntu 서버에서 최초 1회** 실행합니다. 로그인 비밀번호 프롬프트에 토큰을 입력합니다. 기존 Docker 설정 전체를 복사하지 않고 임시 디렉터리에 GHCR 인증만 만듭니다. Secret이 이미 존재하면 덮어쓰지 않고 실패하므로 기존 용도를 먼저 확인합니다. 종료 시 이번에 만든 임시 인증 파일만 삭제하며 서버의 기존 Docker 로그인은 유지됩니다.
+
+```bash
+(
+  set +x
+  set -eu
+  umask 077
+  RADAR_AUTH_DIR=$(mktemp -d)
+  trap 'rm -f "$RADAR_AUTH_DIR/config.json"; rmdir "$RADAR_AUTH_DIR"' EXIT
+  docker --config "$RADAR_AUTH_DIR" login ghcr.io -u BeolLe
+  kubectl -n radar create secret generic radar-ghcr \
+    --type=kubernetes.io/dockerconfigjson \
+    --from-file=.dockerconfigjson="$RADAR_AUTH_DIR/config.json"
+)
+kubectl -n radar get secret radar-ghcr
+```
+
+토큰이나 `kubectl get secret -o yaml/json` 출력은 공유하지 마세요. Secret 생성 성공은 실제 Pod의 이미지 다운로드 성공을 증명하지 않습니다. Secret 내용은 Git/Argo CD 관리 대상에 넣지 않습니다.
 
 업데이트 때는 `git pull --ff-only` 후 **새 태그**로 빌드·등록하고 manifest의 태그도 바꿉니다. 이미 배포한 `v0.1.0`을 덮어쓰지 않습니다. 되돌릴 때는 이전 이미지 태그로 복구하되 DB 스키마 변경의 호환성은 별도로 확인합니다.
 

@@ -20,6 +20,7 @@ class DeploymentTests(unittest.TestCase):
         pods = [w["spec"]["template"]["spec"] for w in (web, job)]
         for pod, secret in zip(pods, ("radar-web-db", "radar-pipeline-db")):
             self.assertFalse(pod["automountServiceAccountToken"])
+            self.assertEqual(pod["imagePullSecrets"], [{"name": "radar-ghcr"}])
             self.assertTrue(pod["securityContext"]["runAsNonRoot"])
             container = pod["containers"][0]
             self.assertTrue(container["securityContext"]["readOnlyRootFilesystem"])

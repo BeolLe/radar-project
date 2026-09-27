@@ -10,6 +10,7 @@
       "spec": {
         "restartPolicy": "Never",
         "automountServiceAccountToken": false,
+        "imagePullSecrets": [{"name": "radar-ghcr"}],
         "securityContext": {
           "runAsNonRoot": true, "runAsUser": 10001, "runAsGroup": 10001,
           "fsGroup": 10001, "fsGroupChangePolicy": "OnRootMismatch",

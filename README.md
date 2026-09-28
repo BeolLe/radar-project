@@ -203,11 +203,38 @@ kubectl auth can-i get pods/attach -n radar --as=system:serviceaccount:pipeline:
 
 근거: [모델 명세](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite), [구조화 응답](https://ai.google.dev/gemini-api/docs/structured-output), [프로젝트 단위 한도·태평양 자정 초기화](https://ai.google.dev/gemini-api/docs/rate-limits). 500회는 사용자 제공 계정 화면에 맞춘 운영 상한이며 Google이 모든 계정에 보장하는 한도가 아닙니다.
 
-#### v0.4.4 — 확인된 계정 한도 반영 (이미지 배포 대기)
+#### v0.4.4 — 확인된 계정 한도 반영
 
 - worker/CLI의 기본 일일 한도와 입력 상한을 200 → 500회로 변경합니다. 실행당 200회, 호출 사이 60초 대기, 제한 재시도, 한국 우선순위, 기존 날짜별 사용량 장부는 그대로 유지합니다.
-- Radar 저장소의 DAG 초안은 v0.4.4·일일 500회를 참조합니다. **Ubuntu에서 v0.4.4 빌드·GHCR push 확인 후** Airflow git-sync 저장소의 DAG를 갱신해야 합니다. 그 전 운영 DAG는 v0.4.3·일일 200회입니다. 웹·수집기 이미지·키 전달 방식은 바꾸지 않습니다.
+- 사용자 제공 실행 로그에서 v0.4.4·일일 500회 운영 반영을 확인했습니다. 배치 000~008의 900건 적재 후 상태·태그 유무 불일치 검증에서 중단됐으며, 아래 v0.4.5에서 해당 응답의 보존 처리를 추가합니다.
 - 이미 저장된 호출 수를 초기화하거나 AI Studio의 53회를 장부에 덧붙이지 않습니다. 두 수치에는 중복과 집계 기간 차이가 있을 수 있으며 다른 앱의 사용량은 이 장부가 알 수 없습니다. 429이면 해당 실행은 중단합니다.
+
+#### v0.4.5 / web v0.2.2 — 상태·태그 불일치 원본 보존 (이미지 배포 대기)
+
+- preliminary에서 `classified`+빈 태그 또는 `unknown`+비어 있지 않은 태그는 해당 항목만 **검토 대기**로 저장합니다. DB의 서비스용 `status=unknown`, `tags=[]`는 보류 표시일 뿐 Gemini 원문을 고쳐 쓴 것이 아닙니다. `evidence.review.code=status_tags_mismatch`, `evidence.review.original_result`에 Gemini가 반환한 상태·태그·신뢰도·이유를 그대로 보존합니다. 원래 API 응답은 raw Parquet에도 남습니다.
+- 같은 배치의 정상 항목은 기존대로 적재하며 불일치만으로 API를 다시 호출하지 않습니다. 검토 항목도 preliminary 이력이 생기므로 다음 시간대에 자동 재선정하지 않습니다. `mart.current_tag`에는 들어가지 않고 웹에서 ‘응답 불일치 · 검토 대기 · URL 미확인’으로 구분합니다. 도메인 상세의 ‘불일치 응답 원본 보기’에서 원래 필드를 열람할 수 있습니다.
+- DB 구조 변경 없이 기존 JSONB evidence를 사용합니다. `checked_at`, 모델/버전·호출 메타데이터, `evidence.raw_path`도 함께 저장합니다. batch 로그의 `review_required`와 `review_domain_ids`로 검토 건수를 구분합니다. `validated_results`는 보류를 포함한 저장 결과 수이지 확정 분류 수가 아닙니다.
+- ID 매칭, 허용 태그 코드·중복·신뢰도 범위, 상세 점검 근거 검사는 유지합니다. 이번 보존 정책은 **상태·태그 유무 불일치만** 대상으로 하며 다른 응답 오류를 무조건 승인하거나 모든 ValueError를 무시하지 않습니다.
+- 과거 저장된 모순 응답도 같은 batch-id의 `tag-batch`로 재처리하면 API 호출 없이 DB에 적재할 수 있습니다. raw 파일이 실제 존재하고 `response`가 저장된 것을 먼저 확인해야 합니다. 기존 raw/날짜별 예산 장부를 삭제하지 않습니다. 새 기능은 자동 승인·자동 재점검을 하지 않으며 후속 검토는 별도 작업입니다.
+- 배포 순서: pipeline v0.4.5와 web v0.2.2 빌드·GHCR push → Airflow git-sync 저장소의 태깅 DAG 갱신 → 웹 manifest 적용/ArgoCD 수동 sync. 현재 저장소의 참조는 배포 초안이며 이미지가 업로드되기 전에는 운영에 적용하지 않습니다. 스키마 재초기화·키 재등록은 필요 없습니다.
+
+검토 대기 목록 조회(이후 같은 단계의 classified 결과가 생긴 항목 제외):
+
+```sql
+SELECT t.id, d.name, t.checked_at, t.model,
+       t.evidence->'api'->>'model_version' AS actual_model,
+       t.evidence->'review'->>'code' AS issue,
+       t.evidence->'review'->'original_result' AS original_result,
+       t.evidence->>'raw_path' AS raw_path
+FROM core.tag_result t JOIN core.domain d ON d.id=t.domain_id
+WHERE t.evidence ? 'review'
+  AND NOT EXISTS (
+    SELECT 1 FROM core.tag_result resolved
+    WHERE resolved.domain_id=t.domain_id AND resolved.phase=t.phase
+      AND resolved.status='classified'
+  )
+ORDER BY t.checked_at, t.id;
+```
 
 ### 결과 검증·적재
 

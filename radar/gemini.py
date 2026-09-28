@@ -87,8 +87,8 @@ def normalize(request: dict, body: str, checked_at: str) -> dict:
                 "api_metadata": {"model_version": response.get("modelVersion"),
                                  "response_id": response.get("responseId"),
                                  "usage": response.get("usageMetadata")}}
-    rows = validate_results(request, envelope, require_all=True)
-    for row in rows:
+    validate_results(request, envelope, require_all=True)
+    for row in envelope["results"]:
         if (len(row["tags"]) > 6 or not isinstance(row.get("reason"), str)
                 or not row["reason"].strip() or len(row["reason"]) > 300):
             raise ValueError("Invalid tag count or reason")
@@ -213,6 +213,7 @@ def tag_batch(batch_id: str, limit: int = 100, daily_limit: int = 500,
             return {"status": "skipped_id_mismatch", "batch_id": batch_id, "raw": str(path),
                     "api_calls": api_calls, "id_errors": error.details,
                     "domain_ids": [d["domain_id"] for d in record["request"]["domains"]]}
+        envelope["raw_path"] = str(path)
         result = import_tags(record["request"], envelope)
         return {**result, "batch_id": batch_id, "raw": str(path), "phase": "preliminary",
                 "api_metadata": envelope["api_metadata"], "api_calls": api_calls}

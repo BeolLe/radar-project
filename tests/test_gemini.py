@@ -472,7 +472,7 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(kwargs["pool"], "radar_collection")
         self.assertEqual(kwargs["arguments"][-2:], ["--daily-limit", "500"])
         self.assertEqual(kwargs["namespace"], "radar")
-        self.assertEqual(kwargs["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.4")
+        self.assertEqual(kwargs["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.5")
         env = kwargs["pod_template_dict"]["spec"]["containers"][0]["env"]
         self.assertFalse(any(e["name"] == "GEMINI_API_KEY" for e in env))
         self.assertNotIn("radar-gemini", str(kwargs))

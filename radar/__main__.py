@@ -193,9 +193,14 @@ def import_tags(request: dict, envelope: dict) -> dict:
             """, (row["domain_id"], request["phase"], row["status"], request["model"],
                   request["prompt_version"], request["taxonomy_version"], Jsonb(row["tags"]),
                   Jsonb({"tool": row["evidence"], "reason": row.get("reason", ""),
+                         **({"review": row["review"]} if "review" in row else {}),
+                         **({"raw_path": envelope["raw_path"]} if "raw_path" in envelope else {}),
                          **({"api": envelope["api_metadata"]} if "api_metadata" in envelope else {})}),
                   row["checked_at"], result_hash))
-    return {"validated_results": len(rows), "missing_ids": sorted(
+    reviews = [row["domain_id"] for row in rows if "review" in row]
+    return {"validated_results": len(rows),
+            **({"review_required": len(reviews), "review_domain_ids": reviews} if reviews else {}),
+            "missing_ids": sorted(
         {d["domain_id"] for d in request["domains"]} - {r["domain_id"] for r in rows})}
 
 

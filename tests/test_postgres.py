@@ -106,15 +106,18 @@ class PostgresTests(unittest.TestCase):
             excluded = pending["domains"][0]["domain_id"]
             self.assertNotIn(excluded, [d["domain_id"] for d in
                                       prepare_tags("preliminary", 100, [excluded])["domains"]])
+            tag_rows = [{"domain_id": d["domain_id"], "status": "unknown", "tags": [],
+                         "reason": "Synthetic unknown"} for d in pending["domains"]]
+            tag_rows[0]["status"] = "classified"
+            tag_rows[1]["tags"] = [{"code": "topic.it", "confidence": .8}]
             api_response = {"modelVersion": "fixture-version", "candidates": [{
                 "finishReason": "STOP", "content": {"parts": [{"text": json.dumps({
-                    "results": [{"domain_id": d["domain_id"], "status": "unknown",
-                                 "tags": [], "reason": "Synthetic unknown"}
-                                for d in pending["domains"]]})}]}}]}
+                    "results": tag_rows})}]}}]}
             with patch.dict(os.environ, {"GEMINI_API_KEY": "synthetic-test-only"}), patch(
                 "radar.gemini.send", return_value=json.dumps(api_response)
             ) as api:
                 tagged = tag_batch("integration", 100)
+                self.assertEqual(tagged["review_required"], 2)
                 self.assertEqual(tag_batch("integration", 100), {**tagged, "api_calls": 0})
                 self.assertEqual(api.call_count, 1)
                 self.assertEqual(prepare_tags("preliminary", 100)["status"], "no_candidates")
@@ -123,6 +126,17 @@ class PostgresTests(unittest.TestCase):
                                      "FROM core.tag_result WHERE domain_id=%s AND phase='preliminary'",
                                      (pending["domains"][0]["domain_id"],)).fetchone()
                 self.assertEqual(saved[0], "fixture-version")
+                for original in tag_rows[:2]:
+                    records = conn.execute("SELECT status,tags,evidence FROM core.tag_result "
+                                           "WHERE domain_id=%s AND phase='preliminary'",
+                                           (original["domain_id"],)).fetchall()
+                    self.assertEqual(len(records), 1)
+                    status, tags, evidence = records[0]
+                    self.assertEqual((status, tags), ("unknown", []))
+                    self.assertEqual(evidence["review"]["original_result"], original)
+                    self.assertTrue(evidence["raw_path"].endswith("integration.parquet"))
+                    self.assertIsNone(conn.execute("SELECT domain_id FROM mart.current_tag WHERE domain_id=%s",
+                                                   (original["domain_id"],)).fetchone())
 
 
 if __name__ == "__main__":

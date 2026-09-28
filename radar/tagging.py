@@ -70,7 +70,8 @@ def validate_results(request: dict, envelope: dict, *, require_all: bool = False
         status, tags = result["status"], result["tags"]
         if status not in {"classified", "unknown", "fetch_failed"} or not isinstance(tags, list):
             raise ValueError("Invalid result status/tags")
-        if (status == "classified") != bool(tags):
+        conflict = (status == "classified") != bool(tags)
+        if conflict and phase != "preliminary":
             raise ValueError("Only classified results may have nonempty tags")
         codes = set()
         for tag in tags:
@@ -92,6 +93,12 @@ def validate_results(request: dict, envelope: dict, *, require_all: bool = False
                     or parsed.hostname != expected[domain_id]["domain"]
                     or not isinstance(result.get("reason"), str) or not result["reason"].strip()):
                 raise ValueError("Detailed classification needs matching tool evidence and reason")
-        rows.append({**result, "evidence": evidence, "checked_at": timestamp})
+        row = {**result, "evidence": evidence, "checked_at": timestamp}
+        row.pop("review", None)  # Review flags are validator-owned, never model-owned.
+        if conflict:
+            row.update(status="unknown", tags=[], review={
+                "code": "status_tags_mismatch", "original_result": dict(result),
+            })
+        rows.append(row)
     # Missing IDs are intentionally not marked complete; caller reports them.
     return rows

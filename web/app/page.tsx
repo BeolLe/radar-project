@@ -25,7 +25,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
       // ponytail: OFFSET pagination for the draft; use keyset pagination for deep browsing.
       rows = await query<Ranking>(`
         SELECT d.id,d.name,o.value,t.tags,t.phase,
-          COALESCE(t.status,(SELECT status FROM core.tag_result WHERE domain_id=d.id
+          COALESCE(t.status,(SELECT CASE WHEN evidence ? 'review' THEN 'needs_review' ELSE status END
+                             FROM core.tag_result WHERE domain_id=d.id
                              ORDER BY imported_at DESC,id DESC LIMIT 1)) AS tag_status,
           ARRAY(SELECT signal FROM mart.domain_signal WHERE snapshot_id=o.snapshot_id AND domain_id=d.id) AS signals
         FROM core.observation o JOIN core.domain d ON d.id=o.domain_id
@@ -71,7 +72,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
             ? row.tags.filter(t => t.code.startsWith("role.")).map(t => <span className="chip role" key={t.code}>{tagNames[t.code] ?? t.code} · {t.confidence.toFixed(2)}</span>)
             : <span className="muted">역할 미확인</span>}</td>
           <td>{row.tags?.filter(t => !t.code.startsWith("role.")).map(t => <span className="chip neutral" key={t.code}>{tagNames[t.code] ?? t.code} · {t.confidence.toFixed(2)}</span>)}
-            <small title={row.tag_status === "unknown" ? "분류 시도 완료 · 근거 부족으로 보류" : !row.tag_status ? "태그 수집·분류 대기" : undefined}>{tagState(row.phase, row.tag_status)}</small></td>
+            <small title={row.tag_status === "needs_review" ? "상태·태그가 서로 맞지 않아 원본을 보존했습니다. 도메인 상세에서 확인할 수 있습니다." : row.tag_status === "unknown" ? "분류 시도 완료 · 근거 부족으로 보류" : !row.tag_status ? "태그 수집·분류 대기" : undefined}>{tagState(row.phase, row.tag_status)}</small></td>
         </tr>)}</tbody></table></div>
       {!rows.length && <p className="empty">조건에 맞는 완료 자료가 없습니다. 처음 실행했다면 demo 명령으로 가상 데이터를 넣을 수 있습니다.</p>}
       <nav className="pagination" aria-label="페이지 이동">{page > 0 && <Link href={link(page - 1)}>← 이전</Link>}<span>{page + 1} 페이지</span>{rows.length > 50 && <Link href={link(page + 1)}>다음 →</Link>}</nav>

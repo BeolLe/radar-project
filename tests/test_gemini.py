@@ -1,4 +1,5 @@
 import copy
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import types
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
+from zoneinfo import ZoneInfo
 
 from radar.gemini import GeminiUnavailable, api_payload, normalize, reserve_budget, send, tag_batch, tag_pending
 from radar.tagging import DomainIdMismatch, make_request
@@ -326,6 +328,22 @@ class GeminiTests(unittest.TestCase):
             self.assertTrue(reserve_budget(directory, "two", 2))
             self.assertFalse(reserve_budget(directory, "three", 2))
 
+    def test_hourly_runs_share_budget_until_pacific_midnight(self):
+        for month, reset_hour_utc in ((9, 7), (12, 8)):
+            with self.subTest(month=month), tempfile.TemporaryDirectory() as folder, patch(
+                "radar.gemini.datetime"
+            ) as clock:
+                directory = Path(folder)
+                for hour, expected in ((reset_hour_utc - 3, True),
+                                       (reset_hour_utc - 2, True),
+                                       (reset_hour_utc - 1, False),
+                                       (reset_hour_utc, True)):
+                    clock.now.return_value = datetime(
+                        2026, month, 28, hour, tzinfo=timezone.utc
+                    ).astimezone(ZoneInfo("America/Los_Angeles"))
+                    self.assertEqual(reserve_budget(directory, f"hour-{hour}", 2), expected)
+                    clock.now.assert_called_with(ZoneInfo("America/Los_Angeles"))
+
     def test_saved_response_replays_after_db_failure_without_api(self):
         with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
             "RADAR_DATA_DIR": folder, "GEMINI_API_KEY": "test-secret",
@@ -413,8 +431,14 @@ class GeminiTests(unittest.TestCase):
         with patch.dict("sys.modules", modules):
             runpy.run_path(str(Path(__file__).resolve().parents[1] / "airflow/radar_tagging.py"))
         self.assertTrue(dag.call_args.kwargs["is_paused_upon_creation"])
+        self.assertEqual(dag.call_args.kwargs["schedule"], "@hourly")
+        self.assertFalse(dag.call_args.kwargs["catchup"])
+        self.assertEqual(dag.call_args.kwargs["max_active_runs"], 1)
+        self.assertEqual(dag.call_args.kwargs["max_active_tasks"], 1)
         self.assertEqual(dag.call_args.kwargs["default_args"], {"retries": 0})
         kwargs = operator.call_args.kwargs
+        self.assertEqual(kwargs["pool"], "radar_collection")
+        self.assertEqual(kwargs["arguments"][-2:], ["--daily-limit", "200"])
         self.assertEqual(kwargs["namespace"], "radar")
         self.assertEqual(kwargs["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.3")
         env = kwargs["pod_template_dict"]["spec"]["containers"][0]["env"]

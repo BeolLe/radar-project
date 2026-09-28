@@ -173,7 +173,8 @@ uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 
 - 일일 예산은 미국 태평양 날짜 기준 최대 200회이며, 실패/수동 검증도 포함합니다. 이 장부는 **Radar만** 셉니다. 같은 Google 프로젝트의 다른 앱 사용량은 알 수 없으므로 다시 Steam을 가동하면 예산을 나눠야 합니다. 429/네트워크 오류는 즉시 중단하며 자동 재시도하지 않습니다.
 - **HTTP 503과 ID 불일치를 합쳐 최초 포함 최대 3회** 시도합니다(재시도 대기 30초, 60초; ID 처리는 v0.4.2부터). 매 시도 전에 별도로 예산을 예약합니다. `max_requests`도 성공 배치 수가 아니라 이번 실행의 실제 호출 수 상한이며, 남은 한도보다 많이 재시도하지 않습니다. `tag-batch` 직접 호출에도 최대 3회 규칙이 적용됩니다.
 - 계속 실패하면 마지막 원인에 따라 `skipped_503` 또는 `skipped_id_mismatch`와 대상 ID를 raw에 남기고 **이번 실행에서만** 제외하여 다음 배치로 진행합니다. DB에 가짜 unknown/성공 태그를 넣지 않으며 새 run-id의 다음 실행에서 다시 선정됩니다. 동일 batch-id 재생은 성공 응답 또는 스킵 기록을 재사용해 API를 호출하지 않습니다. 호출 중 강제 종료처럼 응답 여부가 불명확한 기록은 기존처럼 자동 재호출하지 않습니다. 모든 배치가 스킵되어도 루프는 정상 종료할 수 있으므로 로그의 `completed_batches`, `skipped_batches`, `api_calls`를 함께 확인합니다.
-- `airflow/radar_tagging.py`: 매일 18:00 KST, 최초 paused, retries=0, 기존 radar_collection pool 재사용. 수집 DAG와 직접 성공 의존성은 없고 실행 시 DB에 이미 적재된 도메인을 처리합니다. 첫 수동 Trigger의 `max_requests`는 **1**로 설정하고 결과 확인 후 스케줄을 활성화합니다. 모든 1차 대상 처리 후에는 추가 API 호출 없이 종료합니다.
+- `airflow/radar_tagging.py`: 매시간 정각(`@hourly`), 최초 paused, retries=0, 기존 radar_collection pool 재사용. `catchup=False`, `max_active_runs=1`로 과거 시간대 일괄 실행과 동시 실행을 막습니다. 이전 실행이나 pool 사용 작업이 끝나지 않았다면 시작이 늦어질 수 있습니다. 수집 DAG와 직접 성공 의존성은 없고 실행 시 DB에 이미 적재된 도메인을 처리합니다. 첫 수동 Trigger의 `max_requests`는 **1**로 설정하고 결과 확인 후 스케줄을 활성화합니다. 모든 1차 대상 처리 후에는 추가 API 호출 없이 종료합니다.
+- 매시간 200회씩 새 예산을 주는 것이 아닙니다. 기본 실행 상한은 200회이지만 수동·자동 실행이 같은 일일 장부를 공유하므로 재시도 포함 하루 총 200회까지만 호출합니다. 소진 후 실행은 `daily_budget_exhausted`로 종료합니다. 태평양 자정에 새 예산을 사용하며 한국 시각으로 서머타임 중 16시, 그 외 17시입니다. RPM·입력 TPM·RPD 실제 한도는 [AI Studio](https://aistudio.google.com/rate-limit)에서 같은 Google 프로젝트의 `gemini-3.1-flash-lite`를 확인해야 합니다. 현재 200회는 기존 운영 상한이지 실계정 한도를 조회한 결과가 아닙니다. 100개 도메인을 한 요청으로 보내는 일반 `generateContent` 호출이며 별도 Gemini Batch API 한도가 적용되는 방식이 아닙니다.
 
 #### v0.4.2 — ID 응답 오류
 

@@ -106,7 +106,7 @@ class AirflowGeminiKey(KubernetesPodOperatorCallback):
 
 
 with DAG(
-    dag_id="radar_tagging", schedule="0 9 * * *",  # 18:00 KST, after daily collection.
+    dag_id="radar_tagging", schedule="@hourly",  # Shared daily budget across runs.
     start_date=datetime(2026, 9, 28, tzinfo=timezone.utc), catchup=False,
     max_active_runs=1, max_active_tasks=1, is_paused_upon_creation=True,
     tags=["radar"], default_args={"retries": 0},

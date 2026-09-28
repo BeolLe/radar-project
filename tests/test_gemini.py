@@ -414,7 +414,7 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(dag.call_args.kwargs["default_args"], {"retries": 0})
         kwargs = operator.call_args.kwargs
         self.assertEqual(kwargs["namespace"], "radar")
-        self.assertEqual(kwargs["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.1")
+        self.assertEqual(kwargs["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.2")
         env = kwargs["pod_template_dict"]["spec"]["containers"][0]["env"]
         self.assertFalse(any(e["name"] == "GEMINI_API_KEY" for e in env))
         self.assertNotIn("radar-gemini", str(kwargs))

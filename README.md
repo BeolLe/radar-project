@@ -175,7 +175,7 @@ uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 
 - 계속 실패하면 마지막 원인에 따라 `skipped_503` 또는 `skipped_id_mismatch`와 대상 ID를 raw에 남기고 **이번 실행에서만** 제외하여 다음 배치로 진행합니다. DB에 가짜 unknown/성공 태그를 넣지 않으며 새 run-id의 다음 실행에서 다시 선정됩니다. 동일 batch-id 재생은 성공 응답 또는 스킵 기록을 재사용해 API를 호출하지 않습니다. 호출 중 강제 종료처럼 응답 여부가 불명확한 기록은 기존처럼 자동 재호출하지 않습니다. 모든 배치가 스킵되어도 루프는 정상 종료할 수 있으므로 로그의 `completed_batches`, `skipped_batches`, `api_calls`를 함께 확인합니다.
 - `airflow/radar_tagging.py`: 매일 18:00 KST, 최초 paused, retries=0, 기존 radar_collection pool 재사용. 수집 DAG와 직접 성공 의존성은 없고 실행 시 DB에 이미 적재된 도메인을 처리합니다. 첫 수동 Trigger의 `max_requests`는 **1**로 설정하고 결과 확인 후 스케줄을 활성화합니다. 모든 1차 대상 처리 후에는 추가 API 호출 없이 종료합니다.
 
-#### v0.4.2 배포 준비 — ID 응답 오류
+#### v0.4.2 — ID 응답 오류
 
 2026-09-28 운영 raw 진단에서 배치 `20260928T083356281804-004`는 요청/전송 목록이 일치하고 각각 100개의 고유 ID였지만 응답에 요청 밖 ID `666`이 들어가고 `6666`(`vzwwo.com`)이 빠졌습니다. 앞선 4개 배치는 ID 검사를 통과했습니다. ID를 추측 보정하지 않고 기존 DB 식별자 매칭을 유지합니다.
 
@@ -183,7 +183,7 @@ uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 
 - 요청 밖 ID·중복·자료형 오류·누락을 `tag_id_mismatch.id_errors`에 구분해 기록합니다. API 자동 worker만 전체 ID 응답을 요구하며 기존 수동 importer의 부분 결과 계약은 바꾸지 않습니다.
 - ID 오류가 나면 100개 요청 전체를 같은 조건으로 재호출합니다. 잘못된 ID를 추측하거나 정상으로 보이는 99개를 부분 적재하지 않습니다. 각 시도의 API 원문·시각·오류는 raw의 `attempts`에 보존하며 기존 최상위 `response`는 마지막 응답입니다. 새 재시도 전에 최상위 응답을 비워, 통신 실패 후 이전 응답을 잘못 재사용하지 않습니다.
 - 구버전의 ID 오류 raw를 같은 batch-id로 읽으면 원본 변경/API 호출 없이 스킵 결과를 반환합니다. 실패 도메인을 재요청하려면 새 DAG 실행을 사용합니다. malformed JSON·잘림·잘못된 태그·DB 오류는 이번 자동 재시도 대상이 아니며 계속 중단합니다.
-- pipeline:v0.4.2 빌드·push 확인 후 태깅 DAG 이미지 참조만 갱신합니다. 현재 DAG는 v0.4.1을 유지하며 웹·DB·Airflow Variable은 변경하지 않습니다. 되돌릴 때는 DAG pause/실행 종료 후 v0.4.1로 복구하고 DB/raw/예산 장부를 보존합니다. 구버전은 ID 오류 raw에서 다시 중단할 수 있습니다.
+- 2026-09-28 사용자 로그에서 pipeline:v0.4.2 빌드·GHCR push 성공을 확인해 태깅 DAG 이미지 참조를 갱신했습니다. digest는 `sha256:6168ecac50e3f571f0e23d8bff7a6a61ec5c6c90deb4c43be06dd42a8bd3c2c9`입니다. Airflow git-sync 반영 및 새 실행의 실제 API 결과는 별도 확인 대상입니다. 웹·DB·Airflow Variable은 변경하지 않습니다. 되돌릴 때는 DAG pause/실행 종료 후 v0.4.1로 복구하고 DB/raw/예산 장부를 보존합니다. 구버전은 ID 오류 raw에서 다시 중단할 수 있습니다.
 
 배포 순서: v0.4.0 이미지 빌드/테스트/GHCR push → 갱신한 radar RBAC 적용 → Airflow git-sync 저장소에 `radar_tagging.py` 추가 → DAG processor import 확인 → 1회 검증 → 활성화. 기존 Airflow Variable `gemini_api_key`를 그대로 사용하고 수집 DAG 이미지는 바꾸지 않습니다. 키 전달에는 `pipeline/airflow-worker`의 radar namespace **pods/attach get** 권한만 추가합니다. secrets 조회/생성·pods/exec 권한은 추가하지 않습니다. 전달 실패 시 300초 안에 수신 대기가 끝나며 오류는 키 없이 출력합니다. Kubernetes 관리자·프로세스 메모리를 읽을 수 있는 운영자는 이 방식에서도 신뢰 경계 안에 있습니다.
 

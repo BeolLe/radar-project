@@ -1,5 +1,6 @@
 """Offline request planning and adapter-result validation; never calls Gemini."""
 from datetime import datetime
+from collections import Counter
 import json
 import math
 from pathlib import Path
@@ -8,6 +9,14 @@ from urllib.parse import urlsplit
 TAXONOMY = json.loads((Path(__file__).resolve().parents[1] / "taxonomy.json").read_text())
 LIMITS = {"preliminary": 100, "detail": 20}
 MODEL = "gemini-3.1-flash-lite"
+
+
+class DomainIdMismatch(ValueError):
+    """Safe diagnostics for retryable result-to-request ID mismatches."""
+
+    def __init__(self, details: dict):
+        self.details = details
+        super().__init__("Domain ID mismatch: " + json.dumps(details))
 
 
 def make_request(phase: str, domains: list[dict]) -> dict:
@@ -31,7 +40,7 @@ def make_request(phase: str, domains: list[dict]) -> dict:
             "allowed_tags": TAXONOMY["tags"], "domains": domains}
 
 
-def validate_results(request: dict, envelope: dict) -> list[dict]:
+def validate_results(request: dict, envelope: dict, *, require_all: bool = False) -> list[dict]:
     """tool_evidence must come from an API adapter, NOT model-generated text."""
     phase = request["phase"]
     expected = {item["domain_id"]: item for item in request["domains"]}
@@ -40,12 +49,24 @@ def validate_results(request: dict, envelope: dict) -> list[dict]:
     timestamp = datetime.fromisoformat(envelope["checked_at"])
     if timestamp.tzinfo is None:
         raise ValueError("checked_at needs a timezone")
-    rows, seen = [], set()
-    for result in envelope["results"]:
+    results = envelope["results"]
+    if not isinstance(results, list) or any(not isinstance(r, dict) for r in results):
+        raise ValueError("Results must be a list of objects")
+    ids = [result.get("domain_id") for result in results]
+    counts = Counter(value for value in ids if type(value) is int)
+    details = {
+        "invalid_types": [{"row": n, "type": type(value).__name__}
+                          for n, value in enumerate(ids, 1) if type(value) is not int],
+        "unexpected_ids": sorted(set(counts) - set(expected)),
+        "duplicate_ids": sorted(value for value, count in counts.items() if count > 1),
+        "missing_ids": sorted(set(expected) - set(counts)),
+    }
+    if (details["invalid_types"] or details["unexpected_ids"] or details["duplicate_ids"]
+            or (require_all and details["missing_ids"])):
+        raise DomainIdMismatch(details)
+    rows = []
+    for result in results:
         domain_id = result["domain_id"]
-        if type(domain_id) is not int or domain_id not in expected or domain_id in seen:
-            raise ValueError("Unexpected/duplicate domain ID")
-        seen.add(domain_id)
         status, tags = result["status"], result["tags"]
         if status not in {"classified", "unknown", "fetch_failed"} or not isinstance(tags, list):
             raise ValueError("Invalid result status/tags")

@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
 from radar.gemini import GeminiUnavailable, api_payload, normalize, reserve_budget, send, tag_batch, tag_pending
-from radar.tagging import make_request
+from radar.tagging import DomainIdMismatch, make_request
 from radar.__main__ import prepare_tags
 
 
@@ -31,6 +31,9 @@ class GeminiTests(unittest.TestCase):
         payload = api_payload(self.request)
         self.assertNotIn("tools", payload)
         self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
+        schema = payload["generationConfig"]["responseJsonSchema"]["properties"]["results"]
+        self.assertEqual((schema["minItems"], schema["maxItems"]), (1, 1))
+        self.assertEqual(schema["items"]["properties"]["domain_id"], {"type": "integer", "enum": [1]})
         self.assertIn("web or ws", payload["systemInstruction"]["parts"][0]["text"])
         envelope = normalize(self.request, json.dumps(self.response), self.timestamp)
         self.assertEqual(envelope["api_metadata"]["model_version"], "actual-model-version")
@@ -101,6 +104,144 @@ class GeminiTests(unittest.TestCase):
             {"domain_id": 1, "status": "unknown", "tags": [], "reason": "근거 부족"}]})
         rows = normalize(self.request, json.dumps(self.response), self.timestamp)["results"]
         self.assertEqual(rows[0]["status"], "unknown")
+
+    def test_id_errors_are_distinct_and_never_coerced(self):
+        for values, field in (([666], "unexpected_ids"), ([1, 1], "duplicate_ids"),
+                              ([], "missing_ids"), (["1"], "invalid_types"),
+                              ([True], "invalid_types"), ([1.0], "invalid_types"),
+                              ([None], "invalid_types")):
+            with self.subTest(values=values):
+                response = copy.deepcopy(self.response)
+                response["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+                    "results": [{**self.result, "domain_id": value} for value in values]})
+                with self.assertRaises(DomainIdMismatch) as caught:
+                    normalize(self.request, json.dumps(response), self.timestamp)
+                self.assertTrue(caught.exception.details[field])
+
+    def test_observed_6666_to_666_retries_whole_batch_and_keeps_both_responses(self):
+        import pyarrow.parquet as pq
+        ids = [*range(1000, 1099), 6666]
+        request = make_request("preliminary", [{"domain_id": i, "domain": f"d{i}.example",
+                                               "url": f"https://d{i}.example"} for i in ids])
+        correct = copy.deepcopy(self.response)
+        correct["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+            "results": [{**self.result, "domain_id": i} for i in ids]})
+        wrong = copy.deepcopy(correct)
+        wrong["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+            "results": [{**self.result, "domain_id": i if i != 6666 else 666} for i in ids]})
+        wrong_body, correct_body = json.dumps(wrong), json.dumps(correct)
+        with self.assertRaises(DomainIdMismatch) as caught:
+            normalize(request, wrong_body, self.timestamp)
+        self.assertEqual(caught.exception.details, {"invalid_types": [], "duplicate_ids": [],
+                                                   "unexpected_ids": [666], "missing_ids": [6666]})
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+            "RADAR_DATA_DIR": folder, "GEMINI_API_KEY": "test-secret",
+        }), patch("radar.__main__.connect"), patch(
+            "radar.__main__.prepare_tags", return_value=request
+        ), patch("radar.__main__.import_tags", return_value={"validated_results": 100}) as importer, patch(
+            "radar.gemini.send", side_effect=[wrong_body, correct_body]
+        ) as api, patch("radar.gemini.time.sleep") as sleep:
+            result = tag_batch("observed", 100)
+            self.assertEqual(result["api_calls"], 2)
+            self.assertEqual(result["validated_results"], 100)
+            importer.assert_called_once()
+            self.assertEqual([r["domain_id"] for r in importer.call_args.args[1]["results"]], ids)
+            self.assertEqual(api.call_args_list[0].args[0], api.call_args_list[1].args[0])
+            schema = api.call_args.args[0]["generationConfig"]["responseJsonSchema"]["properties"]["results"]
+            self.assertEqual(schema["items"]["properties"]["domain_id"]["enum"], ids)
+            self.assertEqual((schema["minItems"], schema["maxItems"]), (100, 100))
+            sleep.assert_called_once_with(30)
+            raw = json.loads(pq.read_table(Path(result["raw"])).column("payload")[0].as_py())
+            self.assertEqual(raw["attempts"][0]["response"], wrong_body)
+            self.assertEqual(raw["attempts"][0]["id_errors"], caught.exception.details)
+            self.assertEqual(raw["attempts"][1]["response"], correct_body)
+            self.assertEqual(raw["response"], correct_body)
+            ledger = next((Path(folder) / "raw/gemini/quota").glob("*.parquet"))
+            self.assertEqual(len(json.loads(pq.read_table(ledger).column("payload")[0].as_py())["batches"]), 2)
+            self.assertEqual(tag_batch("observed", 100)["api_calls"], 0)
+            self.assertEqual(api.call_count, 2)
+
+    def test_id_and_503_share_retry_limit_then_skip_to_next_batch(self):
+        import pyarrow.parquet as pq
+        wrong = copy.deepcopy(self.response)
+        wrong["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+            "results": [{**self.result, "domain_id": 666}]})
+        wrong_body = json.dumps(wrong)
+        other = make_request("preliminary", [{"domain_id": 2, "domain": "other.example",
+                                              "url": "https://other.example"}])
+        correct = copy.deepcopy(self.response)
+        correct["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+            "results": [{**self.result, "domain_id": 2}]})
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+            "RADAR_DATA_DIR": folder, "GEMINI_API_KEY": "test-secret",
+        }), patch("radar.__main__.connect"), patch(
+            "radar.__main__.prepare_tags", side_effect=[self.request, other]
+        ) as prepare, patch("radar.__main__.import_tags", return_value={"validated_results": 1}) as importer, patch(
+            "radar.gemini.send", side_effect=[wrong_body, GeminiUnavailable("503"), wrong_body, json.dumps(correct)]
+        ) as api, patch("radar.gemini.time.sleep"):
+            result = tag_pending("mixed", max_requests=4, limit=1)
+            self.assertEqual(result, {"completed_batches": 1, "skipped_batches": 1,
+                                      "api_calls": 4, "status": "run_limit_reached"})
+            self.assertEqual(prepare.call_args.args, ("preliminary", 1, [1]))
+            importer.assert_called_once()
+            self.assertEqual(importer.call_args.args[0], other)
+            path = Path(folder) / "raw/gemini/mixed-000.parquet"
+            raw = json.loads(pq.read_table(path).column("payload")[0].as_py())
+            self.assertEqual(raw["status"], "skipped_id_mismatch")
+            self.assertEqual([a["status"] for a in raw["attempts"]], ["id_mismatch", "http_503", "id_mismatch"])
+            self.assertEqual(raw["attempts"][0]["response"], wrong_body)
+            replay = tag_batch("mixed-000", 1)
+            self.assertEqual((replay["status"], replay["api_calls"]), ("skipped_id_mismatch", 0))
+            self.assertEqual(replay["domain_ids"], [1])
+            self.assertEqual(api.call_count, 4)
+
+    def test_id_failure_respects_daily_budget_and_old_raw_replays_without_mutation(self):
+        wrong = copy.deepcopy(self.response)
+        wrong["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+            "results": [{**self.result, "domain_id": 666}]})
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+            "RADAR_DATA_DIR": folder, "GEMINI_API_KEY": "test-secret",
+        }), patch("radar.__main__.connect"), patch(
+            "radar.__main__.prepare_tags", return_value=self.request
+        ), patch("radar.__main__.import_tags") as importer, patch(
+            "radar.gemini.send", return_value=json.dumps(wrong)
+        ) as api, patch("radar.gemini.time.sleep"):
+            result = tag_batch("quota", 1, daily_limit=1)
+            self.assertEqual(result, {"status": "daily_budget_exhausted", "api_calls": 1})
+            # Pre-v0.4.2 archived responses have no retry/status metadata.
+            from radar.gemini import save
+            path = Path(folder) / "raw/gemini/legacy.parquet"
+            save(path, {"request": self.request, "response": json.dumps(wrong), "checked_at": self.timestamp})
+            before = path.read_bytes()
+            replay = tag_batch("legacy", 1)
+            self.assertEqual((replay["status"], replay["api_calls"]), ("skipped_id_mismatch", 0))
+            self.assertEqual(replay["id_errors"]["unexpected_ids"], [666])
+            self.assertEqual(path.read_bytes(), before)
+            importer.assert_not_called()
+            self.assertEqual(api.call_count, 1)
+
+    def test_id_retry_timeout_keeps_bad_evidence_without_reusing_it(self):
+        import pyarrow.parquet as pq
+        wrong = copy.deepcopy(self.response)
+        wrong["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+            "results": [{**self.result, "domain_id": 666}]})
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+            "RADAR_DATA_DIR": folder, "GEMINI_API_KEY": "test-secret",
+        }), patch("radar.__main__.connect"), patch(
+            "radar.__main__.prepare_tags", return_value=self.request
+        ), patch("radar.__main__.import_tags") as importer, patch(
+            "radar.gemini.send", side_effect=[json.dumps(wrong), RuntimeError("timeout")]
+        ) as api, patch("radar.gemini.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "timeout"):
+                tag_batch("uncertain-retry", 1)
+            raw = json.loads(pq.read_table(Path(folder) / "raw/gemini/uncertain-retry.parquet").column("payload")[0].as_py())
+            self.assertEqual(raw["attempts"][0]["response"], json.dumps(wrong))
+            self.assertIsNone(raw["response"])
+            self.assertEqual(raw["attempts"][1]["status"], "reserved")
+            with self.assertRaisesRegex(RuntimeError, "already reserved"):
+                tag_batch("uncertain-retry", 1)
+            self.assertEqual(api.call_count, 2)
+            importer.assert_not_called()
 
     def test_http_error_no_retry_or_secret_in_error(self):
         with patch("radar.gemini.urlopen", side_effect=HTTPError("url", 429, "secret", {}, None)) as http:

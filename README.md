@@ -171,9 +171,19 @@ uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 
 - DB advisory lock으로 Radar worker 호출을 직렬화합니다. 요청 전 예산을 예약하고, raw/gemini 아래 요청·API 원문·응답 시각을 Parquet로 보존한 다음 기존 DB importer를 호출합니다. 응답의 실제 modelVersion·사용 토큰은 raw와 tag_result.evidence.api에 저장합니다.
 - 같은 batch-id/run-id 재실행은 저장된 응답을 재사용합니다. 응답 저장 전에 종료된 배치는 자동 재호출하지 않습니다. 원인 확인 후 새 ID로 재요청해야 하며, 이전 호출 예산은 환급하지 않습니다. raw/PVC를 삭제하거나 바꾸면 이 보호가 사라집니다.
 - 일일 예산은 미국 태평양 날짜 기준 최대 200회이며, 실패/수동 검증도 포함합니다. 이 장부는 **Radar만** 셉니다. 같은 Google 프로젝트의 다른 앱 사용량은 알 수 없으므로 다시 Steam을 가동하면 예산을 나눠야 합니다. 429/네트워크 오류는 즉시 중단하며 자동 재시도하지 않습니다.
-- **HTTP 503만 최초 포함 최대 3회** 시도합니다(재시도 대기 30초, 60초). 매 시도 전에 별도로 예산을 예약합니다. `max_requests`도 성공 배치 수가 아니라 이번 실행의 실제 호출 수 상한이며, 남은 한도보다 많이 재시도하지 않습니다. `tag-batch` 직접 호출에도 최대 3회 규칙이 적용됩니다.
-- 503이 계속되면 `skipped_503`과 대상 ID를 raw에 남기고 **이번 실행에서만** 제외하여 다음 배치로 진행합니다. DB에 가짜 unknown/성공 태그를 넣지 않으며 새 run-id의 다음 실행에서 다시 선정됩니다. 동일 batch-id 재생은 성공 응답 또는 스킵 기록을 재사용해 API를 호출하지 않습니다. 호출 중 강제 종료처럼 응답 여부가 불명확한 기록은 기존처럼 자동 재호출하지 않습니다. 모든 배치가 스킵되어도 루프는 정상 종료할 수 있으므로 로그의 `completed_batches`, `skipped_batches`, `api_calls`를 함께 확인합니다.
+- **HTTP 503과 ID 불일치를 합쳐 최초 포함 최대 3회** 시도합니다(재시도 대기 30초, 60초; ID 처리는 v0.4.2부터). 매 시도 전에 별도로 예산을 예약합니다. `max_requests`도 성공 배치 수가 아니라 이번 실행의 실제 호출 수 상한이며, 남은 한도보다 많이 재시도하지 않습니다. `tag-batch` 직접 호출에도 최대 3회 규칙이 적용됩니다.
+- 계속 실패하면 마지막 원인에 따라 `skipped_503` 또는 `skipped_id_mismatch`와 대상 ID를 raw에 남기고 **이번 실행에서만** 제외하여 다음 배치로 진행합니다. DB에 가짜 unknown/성공 태그를 넣지 않으며 새 run-id의 다음 실행에서 다시 선정됩니다. 동일 batch-id 재생은 성공 응답 또는 스킵 기록을 재사용해 API를 호출하지 않습니다. 호출 중 강제 종료처럼 응답 여부가 불명확한 기록은 기존처럼 자동 재호출하지 않습니다. 모든 배치가 스킵되어도 루프는 정상 종료할 수 있으므로 로그의 `completed_batches`, `skipped_batches`, `api_calls`를 함께 확인합니다.
 - `airflow/radar_tagging.py`: 매일 18:00 KST, 최초 paused, retries=0, 기존 radar_collection pool 재사용. 수집 DAG와 직접 성공 의존성은 없고 실행 시 DB에 이미 적재된 도메인을 처리합니다. 첫 수동 Trigger의 `max_requests`는 **1**로 설정하고 결과 확인 후 스케줄을 활성화합니다. 모든 1차 대상 처리 후에는 추가 API 호출 없이 종료합니다.
+
+#### v0.4.2 배포 준비 — ID 응답 오류
+
+2026-09-28 운영 raw 진단에서 배치 `20260928T083356281804-004`는 요청/전송 목록이 일치하고 각각 100개의 고유 ID였지만 응답에 요청 밖 ID `666`이 들어가고 `6666`(`vzwwo.com`)이 빠졌습니다. 앞선 4개 배치는 ID 검사를 통과했습니다. ID를 추측 보정하지 않고 기존 DB 식별자 매칭을 유지합니다.
+
+- 응답 JSON Schema의 `domain_id.enum`을 해당 요청의 ID 목록으로 제한하고 `minItems/maxItems`를 요청 수로 고정합니다. 숫자 enum/배열 길이는 [Gemini 공식 지원 명세](https://ai.google.dev/gemini-api/docs/structured-output)에 근거합니다. 중복·누락은 별도 애플리케이션 검증을 계속 적용하며 실계정 새 스키마 호출은 배포 후 확인 대상입니다.
+- 요청 밖 ID·중복·자료형 오류·누락을 `tag_id_mismatch.id_errors`에 구분해 기록합니다. API 자동 worker만 전체 ID 응답을 요구하며 기존 수동 importer의 부분 결과 계약은 바꾸지 않습니다.
+- ID 오류가 나면 100개 요청 전체를 같은 조건으로 재호출합니다. 잘못된 ID를 추측하거나 정상으로 보이는 99개를 부분 적재하지 않습니다. 각 시도의 API 원문·시각·오류는 raw의 `attempts`에 보존하며 기존 최상위 `response`는 마지막 응답입니다. 새 재시도 전에 최상위 응답을 비워, 통신 실패 후 이전 응답을 잘못 재사용하지 않습니다.
+- 구버전의 ID 오류 raw를 같은 batch-id로 읽으면 원본 변경/API 호출 없이 스킵 결과를 반환합니다. 실패 도메인을 재요청하려면 새 DAG 실행을 사용합니다. malformed JSON·잘림·잘못된 태그·DB 오류는 이번 자동 재시도 대상이 아니며 계속 중단합니다.
+- pipeline:v0.4.2 빌드·push 확인 후 태깅 DAG 이미지 참조만 갱신합니다. 현재 DAG는 v0.4.1을 유지하며 웹·DB·Airflow Variable은 변경하지 않습니다. 되돌릴 때는 DAG pause/실행 종료 후 v0.4.1로 복구하고 DB/raw/예산 장부를 보존합니다. 구버전은 ID 오류 raw에서 다시 중단할 수 있습니다.
 
 배포 순서: v0.4.0 이미지 빌드/테스트/GHCR push → 갱신한 radar RBAC 적용 → Airflow git-sync 저장소에 `radar_tagging.py` 추가 → DAG processor import 확인 → 1회 검증 → 활성화. 기존 Airflow Variable `gemini_api_key`를 그대로 사용하고 수집 DAG 이미지는 바꾸지 않습니다. 키 전달에는 `pipeline/airflow-worker`의 radar namespace **pods/attach get** 권한만 추가합니다. secrets 조회/생성·pods/exec 권한은 추가하지 않습니다. 전달 실패 시 300초 안에 수신 대기가 끝나며 오류는 키 없이 출력합니다. Kubernetes 관리자·프로세스 메모리를 읽을 수 있는 운영자는 이 방식에서도 신뢰 경계 안에 있습니다.
 

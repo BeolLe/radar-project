@@ -18,7 +18,8 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(binding["roleRef"]["kind"], "Role")
         self.assertEqual(binding["roleRef"]["name"], role["metadata"]["name"])
         resources = {resource for rule in role["rules"] for resource in rule["resources"]}
-        self.assertEqual(resources, {"pods", "pods/log", "events"})
+        self.assertEqual(resources, {"pods", "pods/log", "pods/attach", "events"})
+        self.assertEqual(next(r["verbs"] for r in role["rules"] if "pods/attach" in r["resources"]), ["get"])
         self.assertIn("  - airflow-rbac.json", (ROOT / "k8s/kustomization.yaml").read_text())
         # Configuration contract only; actual provider import remains a cluster deployment gate.
         airflow = ModuleType("airflow")

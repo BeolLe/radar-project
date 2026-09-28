@@ -151,7 +151,7 @@ uv run --env-file .env python -m radar prepare-tags --phase detail --limit 20 > 
 
 ### 실제 1차 분류 — pipeline:v0.4.0
 
-`GEMINI_API_KEY`, `DATABASE_URL`, 영속 `RADAR_DATA_DIR`가 필요합니다. 기존 44개 태그 계약과 DB를 재사용하므로 스키마 변경 및 웹 이미지 교체는 없습니다.
+CLI 직접 실행은 `GEMINI_API_KEY`, `DATABASE_URL`, 영속 `RADAR_DATA_DIR`가 필요합니다. Airflow 운영은 기존 Variable **`gemini_api_key`**를 태스크 실행 시 읽고, Pod 시작 콜백에서 인증된 Kubernetes attach 표준입력 스트림으로 전달합니다. Gemini용 Secret은 만들지 않습니다. 키를 Pod spec·명령 인자·템플릿·XCom·파일에 넣지 않으며 Pod 프로세스 메모리의 환경변수로만 사용합니다. 기존 44개 태그 계약과 DB를 재사용하므로 스키마 변경 및 웹 이미지 교체는 없습니다.
 
 ```sh
 # 첫 검증: 100개 × 1회. API 키를 명령 인자에 넣지 않습니다.
@@ -167,7 +167,14 @@ uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 
 - 일일 예산은 미국 태평양 날짜 기준 최대 200회이며, 실패/수동 검증도 포함합니다. 이 장부는 **Radar만** 셉니다. 같은 Google 프로젝트의 다른 앱 사용량은 알 수 없으므로 다시 Steam을 가동하면 예산을 나눠야 합니다. 429/네트워크 오류는 즉시 중단하며 자동 재시도하지 않습니다.
 - `airflow/radar_tagging.py`: 매일 18:00 KST, 최초 paused, retries=0, 기존 radar_collection pool 재사용. 수집 DAG와 직접 성공 의존성은 없고 실행 시 DB에 이미 적재된 도메인을 처리합니다. 첫 수동 Trigger의 `max_requests`는 **1**로 설정하고 결과 확인 후 스케줄을 활성화합니다. 모든 1차 대상 처리 후에는 추가 API 호출 없이 종료합니다.
 
-배포 순서: v0.4.0 이미지 빌드/테스트/GHCR push → radar 네임스페이스의 `radar-gemini` Secret에 `GEMINI_API_KEY` 저장 → Airflow git-sync 저장소에 `radar_tagging.py` 추가 → DAG processor import 확인 → 1회 검증 → 활성화. 기존 수집 DAG 이미지는 바꾸지 않습니다. 키는 채팅·Git·로그에 출력하지 않습니다.
+배포 순서: v0.4.0 이미지 빌드/테스트/GHCR push → 갱신한 radar RBAC 적용 → Airflow git-sync 저장소에 `radar_tagging.py` 추가 → DAG processor import 확인 → 1회 검증 → 활성화. 기존 Airflow Variable `gemini_api_key`를 그대로 사용하고 수집 DAG 이미지는 바꾸지 않습니다. 키 전달에는 `pipeline/airflow-worker`의 radar namespace **pods/attach get** 권한만 추가합니다. secrets 조회/생성·pods/exec 권한은 추가하지 않습니다. 전달 실패 시 300초 안에 수신 대기가 끝나며 오류는 키 없이 출력합니다. Kubernetes 관리자·프로세스 메모리를 읽을 수 있는 운영자는 이 방식에서도 신뢰 경계 안에 있습니다.
+
+```sh
+kubectl apply -f k8s/airflow-rbac.json
+kubectl auth can-i get pods/attach -n radar --as=system:serviceaccount:pipeline:airflow-worker
+```
+
+이 변경은 DAG와 RBAC만으로 기존 v0.4.0 이미지에 적용할 수 있습니다. 기존 Secret 방식으로 되돌리지 않고 태깅 DAG를 pause하면 키 전달도 중단됩니다. Variable 키를 바꾸면 다음 새 태깅 Pod부터 적용되며 이미 실행 중인 Pod에는 소급되지 않습니다.
 
 근거: [모델 명세](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite), [구조화 응답](https://ai.google.dev/gemini-api/docs/structured-output), [프로젝트 단위 한도·태평양 자정 초기화](https://ai.google.dev/gemini-api/docs/rate-limits). 200회는 이 프로젝트의 운영 상한이며 Google이 모든 계정에 보장하는 한도가 아닙니다.
 

@@ -168,6 +168,8 @@ class GeminiTests(unittest.TestCase):
             "airflow.sdk": types.SimpleNamespace(Param=lambda value, **kw: value),
             "airflow.providers.cncf.kubernetes.operators.pod": types.SimpleNamespace(
                 KubernetesPodOperator=operator),
+            "airflow.providers.cncf.kubernetes.callbacks": types.SimpleNamespace(
+                KubernetesPodOperatorCallback=object),
         }
         with patch.dict("sys.modules", modules):
             runpy.run_path(str(Path(__file__).resolve().parents[1] / "airflow/radar_tagging.py"))
@@ -177,7 +179,9 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(kwargs["namespace"], "radar")
         self.assertEqual(kwargs["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.0")
         env = kwargs["pod_template_dict"]["spec"]["containers"][0]["env"]
-        self.assertEqual(env[1]["valueFrom"]["secretKeyRef"]["name"], "radar-gemini")
+        self.assertFalse(any(e["name"] == "GEMINI_API_KEY" for e in env))
+        self.assertNotIn("radar-gemini", str(kwargs))
+        self.assertEqual(len(kwargs["callbacks"]), 1)
 
 
 if __name__ == "__main__":

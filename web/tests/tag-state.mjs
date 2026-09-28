@@ -5,10 +5,10 @@ import vm from "node:vm";
 import ts from "typescript";
 import { tagState } from "../lib/tag-state.ts";
 
-assert.equal(tagState(null, null), "태그 수집·분류 대기");
-assert.equal(tagState(null, "unknown"), "분류 보류 · 근거 부족");
+assert.equal(tagState(null, null), "AI 잠정 분류 · URL 미확인");
+assert.equal(tagState(null, "unknown"), "AI 잠정 분류 · URL 미확인");
 assert.equal(tagState("detail", "fetch_failed"), "URL 조회 실패 · 재점검 필요");
-assert.equal(tagState("preliminary", "classified"), "AI 잠정 분류 · URL 미확인");
+assert.equal(tagState("preliminary", "classified"), "URL 미확인");
 assert.equal(tagState("detail", "classified"), "URL 기반 AI 점검 완료");
 // A failed/unknown attempt must never be presented as completed or still waiting.
 assert.equal(tagState("detail", "unknown"), "분류 보류 · 근거 부족");

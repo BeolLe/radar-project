@@ -132,7 +132,7 @@ uv run --env-file .env python -m radar ingest demo-input.json
 
 목록과 도메인 상세 화면은 15초마다 현재 경로를 다시 조회합니다. 숨긴 탭 및 검색 입력 중에는 자동 갱신을 쉬고, `지금 업데이트` 버튼으로 직접 확인할 수 있습니다. DB 적재 후 다음 갱신에 반영되는 polling 방식이지 WebSocket 즉시 전송은 아닙니다. DB 오류를 성공 또는 최신 확인으로 표시하지 않습니다.
 
-결과가 없는 도메인은 `태그 수집·분류 대기`, unknown은 `분류 보류 · 근거 부족`, fetch_failed는 `URL 조회 실패 · 재점검 필요`로 표시합니다. 이는 개별 도메인의 결과 상태이며 실제 worker가 지금 실행 중임을 보증하는 상태판은 아닙니다. 목록에서는 기존 성공 결과가 있으면 계속 우선 표시하고, 상세 이력에서 후속 실패/보류를 확인할 수 있습니다.
+1차 태그가 없는 도메인은 `AI 잠정 분류 · URL 미확인`, 태그가 있으면 태그와 `URL 미확인`만 표시합니다. 미처리/unknown의 차이는 상태 문구의 툴팁에서 확인합니다. 상세 점검 성공은 `URL 기반 AI 점검 완료`, fetch_failed는 `URL 조회 실패 · 재점검 필요`입니다. 이는 개별 도메인의 결과 상태이며 실제 worker가 지금 실행 중임을 보증하는 상태판은 아닙니다. 목록에서는 기존 성공 결과를 우선 표시합니다. 점수는 Gemini 원본 자기평가를 유지하며 1.00이 검증된 정확도 100%라는 뜻은 아닙니다.
 
 기존 `role.*` 태그를 목록의 **도메인 역할** 열에 따로 표시합니다. 사용자용 사이트·앱 / API·백엔드 / CDN·정적 리소스 / 광고·측정 / 인증·서비스 연동 / 주차·판매 도메인을 재사용하며 taxonomy 변경이나 pipeline 이미지 재빌드는 필요 없습니다. `api`, `app` 문자열만으로 역할을 강제하지 않습니다. 앱 자체와 앱의 API는 다른 역할일 수 있고, 현재 분류체계는 사용자용 웹사이트와 앱을 하나의 역할로 묶습니다.
 
@@ -149,22 +149,26 @@ uv run --env-file .env python -m radar prepare-tags --phase detail --limit 20 > 
 
 `prepare-tags` 자체는 offline 요청 초안입니다. 실제 1차 worker는 아래 `tag-batch` / `tag-pending`을 사용합니다. 상세 URL Context 자동 실행·초기 모집단 고정·1차 종료 후 2차 전환·별도 서비스 상세정보 테이블은 아직 구현하지 않았습니다. unknown 이력은 자동 무한 재시도하지 않으며 재점검 정책도 후속 구현입니다.
 
-### 실제 1차 분류 — pipeline:v0.4.0
+### 실제 1차 분류 — pipeline:v0.4.1 배포 준비
+
+v0.4.1은 최신 국가 목록 우선순위와 503 재시도를 추가합니다. web:v0.2.1은 표시 문구 변경입니다. 두 이미지의 빌드·push를 확인한 후에만 태깅 DAG / 웹 Deployment의 이미지 참조를 올립니다. 현재 매니페스트는 기존 이미지로 유지하며 DB 스키마 변경은 없습니다.
 
 CLI 직접 실행은 `GEMINI_API_KEY`, `DATABASE_URL`, 영속 `RADAR_DATA_DIR`가 필요합니다. Airflow 운영은 기존 Variable **`gemini_api_key`**를 태스크 실행 시 읽고, Pod 시작 콜백에서 인증된 Kubernetes attach 표준입력 스트림으로 전달합니다. Gemini용 Secret은 만들지 않습니다. 키를 Pod spec·명령 인자·템플릿·XCom·파일에 넣지 않으며 Pod 프로세스 메모리의 환경변수로만 사용합니다. 기존 44개 태그 계약과 DB를 재사용하므로 스키마 변경 및 웹 이미지 교체는 없습니다.
 
 ```sh
-# 첫 검증: 100개 × 1회. API 키를 명령 인자에 넣지 않습니다.
-uv run --env-file .env python -m radar tag-batch --batch-id preliminary-check-001 --limit 100
+# 첫 검증: 100개 × 최대 1회(재시도 포함). API 키를 명령 인자에 넣지 않습니다.
+uv run --env-file .env python -m radar tag-pending --run-id preliminary-check-001 --max-requests 1
 # 자동 worker와 동일한 호출: 최대 200회, 호출 사이 60초 대기
 uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 --max-requests 200
 ```
 
 - `gemini-3.1-flash-lite`의 `generateContent` JSON Schema 응답을 사용합니다. Steam의 모델/키 환경변수 규약을 재사용하며, URL Context가 없는 1차 분류라 Interactions 호출 코드를 복사하지 않습니다. 도메인 ID당 결과 한 개, 허용 태그 최대 6개, 신뢰도 0..1을 검사합니다. 누락·잘림·잘못된 태그는 해당 배치 전체 적재를 거부합니다.
-- 대상은 preliminary 이력이 없는 도메인만입니다. **누적 국가 관측 이력에서 한국 → 다른 국가 → 나머지 글로벌 전용 도메인** 순서이며 여러 국가에 겹치면 한국 우선으로 한 번만 처리합니다. 같은 그룹은 관측 최소 순위·도메인 ID 순서입니다(글로벌 전용은 ID 순서). `web`/`ws`도 삭제하지 않고 근거가 부족하면 unknown으로 기록합니다. 사이트를 실제 방문했다는 의미가 아닙니다.
+- 대상은 preliminary 이력이 없는 도메인만입니다. **최신 한국 Top 100 → 다른 국가별 최신 목록 → 나머지 도메인** 순서이며 여러 국가에 겹치면 한국 우선으로 한 번만 처리합니다. 한국은 한국 순위, 다른 국가는 최신 목록 내 최소 순위, 동순위와 나머지 도메인은 ID 순서입니다. 과거 한국 등장 이력이나 외국에서의 높은 순위가 최신 한국 순서를 바꾸지 않습니다. unknown은 이미 분류를 시도한 상태로 자동 재요청하지 않습니다. `web`/`ws`도 삭제하지 않고 근거가 부족하면 unknown으로 기록합니다.
 - DB advisory lock으로 Radar worker 호출을 직렬화합니다. 요청 전 예산을 예약하고, raw/gemini 아래 요청·API 원문·응답 시각을 Parquet로 보존한 다음 기존 DB importer를 호출합니다. 응답의 실제 modelVersion·사용 토큰은 raw와 tag_result.evidence.api에 저장합니다.
 - 같은 batch-id/run-id 재실행은 저장된 응답을 재사용합니다. 응답 저장 전에 종료된 배치는 자동 재호출하지 않습니다. 원인 확인 후 새 ID로 재요청해야 하며, 이전 호출 예산은 환급하지 않습니다. raw/PVC를 삭제하거나 바꾸면 이 보호가 사라집니다.
 - 일일 예산은 미국 태평양 날짜 기준 최대 200회이며, 실패/수동 검증도 포함합니다. 이 장부는 **Radar만** 셉니다. 같은 Google 프로젝트의 다른 앱 사용량은 알 수 없으므로 다시 Steam을 가동하면 예산을 나눠야 합니다. 429/네트워크 오류는 즉시 중단하며 자동 재시도하지 않습니다.
+- **HTTP 503만 최초 포함 최대 3회** 시도합니다(재시도 대기 30초, 60초). 매 시도 전에 별도로 예산을 예약합니다. `max_requests`도 성공 배치 수가 아니라 이번 실행의 실제 호출 수 상한이며, 남은 한도보다 많이 재시도하지 않습니다. `tag-batch` 직접 호출에도 최대 3회 규칙이 적용됩니다.
+- 503이 계속되면 `skipped_503`과 대상 ID를 raw에 남기고 **이번 실행에서만** 제외하여 다음 배치로 진행합니다. DB에 가짜 unknown/성공 태그를 넣지 않으며 새 run-id의 다음 실행에서 다시 선정됩니다. 동일 batch-id 재생은 성공 응답 또는 스킵 기록을 재사용해 API를 호출하지 않습니다. 호출 중 강제 종료처럼 응답 여부가 불명확한 기록은 기존처럼 자동 재호출하지 않습니다. 모든 배치가 스킵되어도 루프는 정상 종료할 수 있으므로 로그의 `completed_batches`, `skipped_batches`, `api_calls`를 함께 확인합니다.
 - `airflow/radar_tagging.py`: 매일 18:00 KST, 최초 paused, retries=0, 기존 radar_collection pool 재사용. 수집 DAG와 직접 성공 의존성은 없고 실행 시 DB에 이미 적재된 도메인을 처리합니다. 첫 수동 Trigger의 `max_requests`는 **1**로 설정하고 결과 확인 후 스케줄을 활성화합니다. 모든 1차 대상 처리 후에는 추가 API 호출 없이 종료합니다.
 
 배포 순서: v0.4.0 이미지 빌드/테스트/GHCR push → 갱신한 radar RBAC 적용 → Airflow git-sync 저장소에 `radar_tagging.py` 추가 → DAG processor import 확인 → 1회 검증 → 활성화. 기존 Airflow Variable `gemini_api_key`를 그대로 사용하고 수집 DAG 이미지는 바꾸지 않습니다. 키 전달에는 `pipeline/airflow-worker`의 radar namespace **pods/attach get** 권한만 추가합니다. secrets 조회/생성·pods/exec 권한은 추가하지 않습니다. 전달 실패 시 300초 안에 수신 대기가 끝나며 오류는 키 없이 출력합니다. Kubernetes 관리자·프로세스 메모리를 읽을 수 있는 운영자는 이 방식에서도 신뢰 경계 안에 있습니다.

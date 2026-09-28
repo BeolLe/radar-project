@@ -35,9 +35,10 @@ export default async function Domain({ params, searchParams }: {
     </tbody></table></div>
     <p className="muted">관측된 날짜만 표시합니다. 빈 기간을 자동으로 순위권 이탈로 해석하지 않습니다.</p>
     <h2>Gemini API 태깅 이력</h2>
-    {!tags.length && <p className="empty">태그 수집·분류 대기 중입니다. 한국 → 다른 국가 → 글로벌 순서로 처리하며, 결과가 저장되면 이 화면에 자동 반영됩니다.</p>}
+    {!tags.length && <p className="empty">AI 잠정 분류 · URL 미확인<br />태그 수집·분류 대기 중입니다. 한국 → 다른 국가 → 글로벌 순서로 처리하며, 결과가 저장되면 이 화면에 자동 반영됩니다.</p>}
     {tags.map((t, i) => <section className="tag-record" key={i}>
       <strong>{tagState(t.phase, t.status)}</strong>
+      {t.status === "unknown" && <small>분류 시도 완료 · 근거 부족으로 보류</small>}
       <p>{t.tags.map(tag => <span className={`chip ${tag.code.startsWith("role.") ? "role" : "neutral"}`} key={tag.code}>{tagNames[tag.code] ?? tag.code} · {tag.confidence.toFixed(2)}</span>)}</p>
       <small>{t.checked} · {t.model}</small>
     </section>)}

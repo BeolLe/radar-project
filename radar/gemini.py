@@ -1,4 +1,4 @@
-"""One preliminary batch; durable API evidence, no automatic network retries."""
+"""Preliminary batches with durable evidence and quota-counted, bounded 503 retries."""
 from datetime import datetime, timezone
 import json
 import os
@@ -11,6 +11,10 @@ from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 from .tagging import MODEL, TAXONOMY, validate_results
+
+
+class GeminiUnavailable(RuntimeError):
+    """A confirmed HTTP 503, distinct from an ambiguous connection failure."""
 
 
 def api_payload(request: dict) -> dict:
@@ -60,6 +64,8 @@ def send(payload: dict, key: str) -> str:
                 raise RuntimeError("Gemini response exceeds 8 MiB; not retried")
             return body.decode("utf-8")
     except HTTPError as exc:
+        if exc.code == 503:
+            raise GeminiUnavailable("Gemini HTTP 503") from None
         raise RuntimeError(f"Gemini HTTP {exc.code}; stopped without retry") from None
     except (URLError, TimeoutError):
         raise RuntimeError("Gemini connection failed; request may have counted, not retried") from None
@@ -127,8 +133,9 @@ def reserve_budget(directory: Path, batch_id: str, daily_limit: int):
     return True
 
 
-def tag_batch(batch_id: str, limit: int = 100, daily_limit: int = 200) -> dict:
-    """A batch ID is a durable no-retry key, including after ambiguous HTTP failures."""
+def tag_batch(batch_id: str, limit: int = 100, daily_limit: int = 200,
+              *, exclude_ids=(), max_attempts: int = 3) -> dict:
+    """Only confirmed 503s retry in-process; persisted results replay without calls."""
     import pyarrow.parquet as pq
     from .__main__ import connect, prepare_tags, import_tags
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", batch_id):
@@ -137,36 +144,66 @@ def tag_batch(batch_id: str, limit: int = 100, daily_limit: int = 200) -> dict:
         raise ValueError("limit must be 1..100")
     if not 1 <= daily_limit <= 200:
         raise ValueError("daily-limit must be 1..200")
+    if not 1 <= max_attempts <= 3:
+        raise ValueError("max-attempts must be 1..3")
     directory = Path(os.environ.get("RADAR_DATA_DIR", "data")) / "raw" / "gemini"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{batch_id}.parquet"
+    api_calls = 0
     # ponytail: one Radar tag worker per DB; shared-project quota scheduling is separate.
     with connect() as conn:
         if not conn.execute("SELECT pg_try_advisory_lock(73194202)").fetchone()[0]:
             raise RuntimeError("Another Radar tagging batch is running")
         if path.exists():
             record = json.loads(pq.read_table(path).column("payload")[0].as_py())
+            if record.get("status") == "skipped_503":
+                return {"status": "skipped_503", "batch_id": batch_id, "raw": str(path),
+                        "api_calls": 0,
+                        "domain_ids": [d["domain_id"] for d in record["request"]["domains"]]}
             if record["response"] is None:
                 raise RuntimeError("Batch already reserved but no response saved; inspect before a new batch ID")
         else:
             key = os.environ.get("GEMINI_API_KEY", "").strip()
             if not key:
-                raise ValueError("Set GEMINI_API_KEY via a Kubernetes Secret; do not put it in logs")
-            request = prepare_tags("preliminary", limit)
+                raise ValueError("GEMINI_API_KEY was not delivered; do not put it in logs")
+            request = prepare_tags("preliminary", limit, exclude_ids)
             if not request["domains"]:
                 return request
-            if not reserve_budget(directory, batch_id, daily_limit):
-                return {"status": "daily_budget_exhausted"}
             record = {"request": request, "api_request": api_payload(request), "response": None,
-                      "checked_at": None}
-            save(path, record)  # Reserve before network; task retries cannot consume another call.
-            record["response"] = send(record["api_request"], key)
-            record["checked_at"] = datetime.now(timezone.utc).isoformat()
-            save(path, record)  # Preserve even invalid/blocked/truncated model output before parsing.
+                      "checked_at": None, "attempts": []}
+            for attempt in range(max_attempts):
+                if attempt:
+                    time.sleep(30 * attempt)
+                attempt_id = batch_id if not attempt else f"{batch_id}-retry-{attempt}"
+                if not reserve_budget(directory, attempt_id, daily_limit):
+                    return {"status": "daily_budget_exhausted", "api_calls": api_calls}
+                record["attempts"].append({"at": datetime.now(timezone.utc).isoformat(),
+                                           "status": "reserved"})
+                save(path, record)  # Persist before each call, including retries.
+                api_calls += 1
+                try:
+                    record["response"] = send(record["api_request"], key)
+                except GeminiUnavailable:
+                    record["attempts"][-1]["status"] = "http_503"
+                    if attempt + 1 == max_attempts:
+                        record["status"] = "skipped_503"
+                    save(path, record)
+                    print(json.dumps({"event": "tag_http_503", "batch_id": batch_id,
+                                      "attempt": attempt + 1, "max_attempts": max_attempts,
+                                      "action": "skip" if record.get("status") else "retry"}), flush=True)
+                    if record.get("status"):
+                        return {"status": "skipped_503", "batch_id": batch_id, "raw": str(path),
+                                "api_calls": api_calls,
+                                "domain_ids": [d["domain_id"] for d in request["domains"]]}
+                    continue
+                record["attempts"][-1]["status"] = "response_saved"
+                record["checked_at"] = datetime.now(timezone.utc).isoformat()
+                save(path, record)  # Preserve invalid/blocked/truncated output before parsing.
+                break
         envelope = normalize(record["request"], record["response"], record["checked_at"])
         result = import_tags(record["request"], envelope)
         return {**result, "batch_id": batch_id, "raw": str(path), "phase": "preliminary",
-                "api_metadata": envelope["api_metadata"]}
+                "api_metadata": envelope["api_metadata"], "api_calls": api_calls}
 
 
 def tag_pending(run_id: str, max_requests: int = 200, limit: int = 100,
@@ -175,13 +212,25 @@ def tag_pending(run_id: str, max_requests: int = 200, limit: int = 100,
         raise ValueError("run-id must be 1..90 ASCII letters/digits/underscores/hyphens")
     if not 1 <= max_requests <= 200:
         raise ValueError("max-requests must be 1..200")
-    completed = 0
+    completed = skipped = calls = 0
+    excluded = set()
+    status = "run_limit_reached"
     for index in range(max_requests):
         if index:
             time.sleep(60)  # Conservative pacing; 429 stops the run instead of retrying.
-        result = tag_batch(f"{run_id}-{index:03d}", limit, daily_limit)
+        result = tag_batch(f"{run_id}-{index:03d}", limit, daily_limit,
+                           exclude_ids=sorted(excluded), max_attempts=min(3, max_requests - calls))
+        calls += result.get("api_calls", 0)
         print(json.dumps({"event": "tag_batch", **result}, ensure_ascii=False), flush=True)
         if result.get("status") in {"no_candidates", "daily_budget_exhausted"}:
-            return {"completed_batches": completed, "status": result["status"]}
-        completed += 1
-    return {"completed_batches": completed, "status": "run_limit_reached"}
+            status = result["status"]
+            break
+        if result.get("status") == "skipped_503":
+            excluded.update(result["domain_ids"])
+            skipped += 1
+        else:
+            completed += 1
+        if calls >= max_requests:
+            break
+    return {"completed_batches": completed, "skipped_batches": skipped,
+            "api_calls": calls, "status": status}

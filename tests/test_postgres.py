@@ -93,6 +93,19 @@ class PostgresTests(unittest.TestCase):
             ordered = [d["domain"] for d in pending["domains"]]
             self.assertLess(ordered.index("run.app"), ordered.index("api.example.com"))
             self.assertLess(ordered.index("api.example.com"), ordered.index("web"))
+            # Old KR rank 1 must not displace current KR, nor may JP rank 1 reorder KR.
+            for location, values in (("KR", [("ws", 1), ("web", 2)]),
+                                     ("JP", [("web", 1), ("api.example.com", 2)])):
+                ingest({"kind": "daily", "date": "2026-01-28", "location": location,
+                        "sources": [{"id": "latest-" + location, "expected_rows": 2,
+                                     "rows": [{"domain": name, "rank": rank} for name, rank in values]}]})
+            pending = prepare_tags("preliminary", 100)
+            ordered = [d["domain"] for d in pending["domains"]]
+            self.assertEqual(ordered[:3], ["ws", "web", "api.example.com"])
+            self.assertGreater(ordered.index("run.app"), 2)
+            excluded = pending["domains"][0]["domain_id"]
+            self.assertNotIn(excluded, [d["domain_id"] for d in
+                                      prepare_tags("preliminary", 100, [excluded])["domains"]])
             api_response = {"modelVersion": "fixture-version", "candidates": [{
                 "finishReason": "STOP", "content": {"parts": [{"text": json.dumps({
                     "results": [{"domain_id": d["domain_id"], "status": "unknown",
@@ -102,7 +115,7 @@ class PostgresTests(unittest.TestCase):
                 "radar.gemini.send", return_value=json.dumps(api_response)
             ) as api:
                 tagged = tag_batch("integration", 100)
-                self.assertEqual(tag_batch("integration", 100), tagged)
+                self.assertEqual(tag_batch("integration", 100), {**tagged, "api_calls": 0})
                 self.assertEqual(api.call_count, 1)
                 self.assertEqual(prepare_tags("preliminary", 100)["status"], "no_candidates")
             with connect() as conn:

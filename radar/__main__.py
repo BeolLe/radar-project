@@ -133,29 +133,35 @@ def build_signals(conn, current: int, previous: int, meta: dict):
     """, (current, previous, current))
 
 
-def prepare_tags(phase: str, limit: int) -> dict:
+def prepare_tags(phase: str, limit: int, exclude_ids=()) -> dict:
     if not 1 <= limit <= LIMITS[phase]:
         raise ValueError(f"Limit for {phase} must be 1..{LIMITS[phase]}")
     with connect() as conn:
         # Unknown attempts are not silently retried forever. They need explicit later review.
-        # Any observed KR membership wins, then other countries; global-only fills the rest.
+        # Latest KR list and its own ranks win, not historical or foreign best ranks.
         rows = conn.execute("""
+          WITH latest AS (
+            SELECT location,max(period_date) AS period_date FROM core.snapshot
+            WHERE kind='daily' AND location<>'WORLD' GROUP BY location
+          )
           SELECT d.id,d.name FROM core.domain d
           JOIN core.observation o ON o.domain_id=d.id
           JOIN core.snapshot s ON s.id=o.snapshot_id
-          WHERE s.kind='daily' AND s.location<>'WORLD' AND NOT EXISTS (
+          JOIN latest l ON l.location=s.location AND l.period_date=s.period_date
+          WHERE s.kind='daily' AND d.id<>ALL(%s::bigint[]) AND NOT EXISTS (
             SELECT 1 FROM core.tag_result t WHERE t.domain_id=d.id AND t.phase=%s
           ) GROUP BY d.id
-          ORDER BY min(CASE WHEN s.location='KR' THEN 0 ELSE 1 END),min(o.value),d.id
+          ORDER BY min(CASE WHEN s.location='KR' THEN 0 ELSE 1 END),
+            COALESCE(min(o.value) FILTER (WHERE s.location='KR'),min(o.value)),d.id
           LIMIT %s
-        """, (phase, limit)).fetchall()
+        """, (list(exclude_ids), phase, limit)).fetchall()
         if len(rows) < limit:
             rows += conn.execute("""
               SELECT d.id,d.name FROM core.domain d WHERE d.id<>ALL(%s::bigint[])
               AND NOT EXISTS (
                 SELECT 1 FROM core.tag_result t WHERE t.domain_id=d.id AND t.phase=%s
               ) ORDER BY d.id LIMIT %s
-            """, ([row[0] for row in rows], phase, limit - len(rows))).fetchall()
+            """, ([*exclude_ids, *(row[0] for row in rows)], phase, limit - len(rows))).fetchall()
     if not rows:
         return {"phase": phase, "domains": [], "status": "no_candidates"}
     return make_request(phase, [{"domain_id": row[0], "domain": row[1],

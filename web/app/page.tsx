@@ -46,9 +46,10 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
     <p className="intro">도메인의 관측 이력과 변화 신호를 살펴봅니다. 상세 점검 전 AI 분류는 잠정 결과로 표시됩니다.</p>
     <aside className="tag-notice" aria-label="태그 분류 안내">
       <strong>Gemini API 태그를 순차적으로 수집·분류합니다.</strong>
-      <p>한국 → 다른 국가 → 글로벌 전용 도메인 순서로 처리하며, 완료된 태그부터 표시합니다.
-        아직 결과가 없으면 ‘수집·분류 대기’, 판단 근거가 부족하면 ‘분류 보류’로 표시합니다.</p>
-      <small>도메인 역할은 사용자용 사이트·앱, API·백엔드, CDN 등으로 구분합니다. 이름의 api·app만으로 단정하지 않습니다. 점수는 모델의 자기평가입니다.</small>
+      <p>최신 한국 Top 100 → 다른 국가의 최신 목록 → 나머지 도메인 순서로 처리합니다.
+        태그가 없으면 ‘AI 잠정 분류 · URL 미확인’, 태그가 있으면 태그와 ‘URL 미확인’을 표시합니다.
+        URL 상세 점검은 별도 단계이며, 태그가 비어 있어도 근거 부족으로 분류가 보류된 경우가 있습니다.</p>
+      <small>도메인 역할은 사용자용 사이트·앱, API·백엔드, CDN 등으로 구분합니다. 이름의 api·app만으로 단정하지 않습니다. 점수는 AI 자기평가이며, 1.00도 검증된 정확도 100%를 뜻하지 않습니다.</small>
     </aside>
     <AutoRefresh />
     <form className="filters" method="get">
@@ -70,7 +71,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
             ? row.tags.filter(t => t.code.startsWith("role.")).map(t => <span className="chip role" key={t.code}>{tagNames[t.code] ?? t.code} · {t.confidence.toFixed(2)}</span>)
             : <span className="muted">역할 미확인</span>}</td>
           <td>{row.tags?.filter(t => !t.code.startsWith("role.")).map(t => <span className="chip neutral" key={t.code}>{tagNames[t.code] ?? t.code} · {t.confidence.toFixed(2)}</span>)}
-            <small>{tagState(row.phase, row.tag_status)}</small></td>
+            <small title={row.tag_status === "unknown" ? "분류 시도 완료 · 근거 부족으로 보류" : !row.tag_status ? "태그 수집·분류 대기" : undefined}>{tagState(row.phase, row.tag_status)}</small></td>
         </tr>)}</tbody></table></div>
       {!rows.length && <p className="empty">조건에 맞는 완료 자료가 없습니다. 처음 실행했다면 demo 명령으로 가상 데이터를 넣을 수 있습니다.</p>}
       <nav className="pagination" aria-label="페이지 이동">{page > 0 && <Link href={link(page - 1)}>← 이전</Link>}<span>{page + 1} 페이지</span>{rows.length > 50 && <Link href={link(page + 1)}>다음 →</Link>}</nav>

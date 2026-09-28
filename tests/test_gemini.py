@@ -3,13 +3,14 @@ import json
 import os
 from pathlib import Path
 import runpy
+import sqlite3
 import tempfile
 import types
 import unittest
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 
-from radar.gemini import api_payload, normalize, reserve_budget, send, tag_batch, tag_pending
+from radar.gemini import GeminiUnavailable, api_payload, normalize, reserve_budget, send, tag_batch, tag_pending
 from radar.tagging import make_request
 from radar.__main__ import prepare_tags
 
@@ -41,12 +42,15 @@ class GeminiTests(unittest.TestCase):
             conn = connect.return_value.__enter__.return_value
             conn.execute.return_value.fetchall.side_effect = [[(10, "kr.example"), (20, "jp.example")],
                                                              [(1, "global.example")]]
-            request = prepare_tags("preliminary", 3)
+            request = prepare_tags("preliminary", 3, [99])
             self.assertEqual([d["domain_id"] for d in request["domains"]], [10, 20, 1])
             country_call, global_call = conn.execute.call_args_list
             self.assertIn("s.location='KR' THEN 0 ELSE 1", country_call.args[0])
-            self.assertIn("s.location<>'WORLD'", country_call.args[0])
-            self.assertEqual(global_call.args[1], ([10, 20], "preliminary", 1))
+            self.assertIn("max(period_date)", country_call.args[0])
+            self.assertIn("l.period_date=s.period_date", country_call.args[0])
+            self.assertIn("FILTER (WHERE s.location='KR')", country_call.args[0])
+            self.assertEqual(country_call.args[1], ([99], "preliminary", 3))
+            self.assertEqual(global_call.args[1], ([99, 10, 20], "preliminary", 1))
 
     def test_refuses_incomplete_unknown_id_duplicate_bad_tags(self):
         variants = [[], [self.result, self.result], [{**self.result, "domain_id": 2}],
@@ -64,6 +68,34 @@ class GeminiTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 normalize(self.request, json.dumps(response), self.timestamp)
 
+    def test_priority_query_uses_latest_kr_ranks_with_real_rows(self):
+        # stdlib relational check; PostgreSQL-specific syntax is also covered by the opt-in test.
+        with sqlite3.connect(":memory:") as database, patch("radar.__main__.connect") as connect:
+            database.executescript("""
+              ATTACH DATABASE ':memory:' AS core;
+              CREATE TABLE core.domain(id INTEGER PRIMARY KEY, name TEXT);
+              CREATE TABLE core.snapshot(id INTEGER, kind TEXT, location TEXT, period_date TEXT);
+              CREATE TABLE core.observation(snapshot_id INTEGER, domain_id INTEGER, value INTEGER);
+              CREATE TABLE core.tag_result(domain_id INTEGER, phase TEXT);
+              INSERT INTO core.domain VALUES (1,'old-kr.example'),(2,'kr-second.example'),
+                (3,'kr-first.example'),(4,'jp.example'),(5,'global.example');
+              INSERT INTO core.snapshot VALUES (1,'daily','KR','2026-09-26'),
+                (2,'daily','KR','2026-09-27'),(3,'daily','JP','2026-09-27'),
+                (4,'weekly','WORLD','2026-09-21');
+              INSERT INTO core.observation VALUES (1,1,1),(2,3,1),(2,2,2),
+                (3,2,1),(3,4,2),(4,5,200);
+            """)
+            def execute(sql, params):
+                sql = sql.replace("d.id<>ALL(%s::bigint[])",
+                                  "d.id NOT IN (SELECT value FROM json_each(%s))").replace("%s", "?")
+                return database.execute(sql, [json.dumps(p) if isinstance(p, list) else p for p in params])
+            connect.return_value.__enter__.return_value.execute.side_effect = execute
+            def ids(excluded=()):
+                return [d["domain_id"] for d in prepare_tags("preliminary", 100, excluded)["domains"]]
+            self.assertEqual(ids(), [3, 2, 4, 1, 5])
+            self.assertEqual(ids([3]), [2, 4, 1, 5])
+            database.execute("INSERT INTO core.tag_result VALUES (3,'preliminary')")
+            self.assertEqual(ids(), [2, 4, 1, 5])
     def test_unknown_is_completed_without_tags(self):
         self.response["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({"results": [
             {"domain_id": 1, "status": "unknown", "tags": [], "reason": "근거 부족"}]})
@@ -77,6 +109,70 @@ class GeminiTests(unittest.TestCase):
             self.assertNotIn("secret", str(caught.exception))
             self.assertEqual(http.call_count, 1)
             self.assertNotIn("test-secret", http.call_args.args[0].full_url)
+        with patch("radar.gemini.urlopen", side_effect=HTTPError("url", 503, "secret", {}, None)):
+            with self.assertRaises(GeminiUnavailable) as caught:
+                send(api_payload(self.request), "test-secret")
+            self.assertNotIn("secret", str(caught.exception))
+
+    def test_503_retries_are_bounded_archived_and_budgeted(self):
+        import pyarrow.parquet as pq
+        for failures, budget, expected in ((2, 200, "success"), (3, 200, "skipped_503"),
+                                            (3, 2, "daily_budget_exhausted")):
+            with self.subTest(failures=failures, budget=budget), tempfile.TemporaryDirectory() as folder, patch.dict(
+                os.environ, {"RADAR_DATA_DIR": folder, "GEMINI_API_KEY": "test-secret"}
+            ), patch("radar.__main__.connect"), patch(
+                "radar.__main__.prepare_tags", return_value=self.request
+            ), patch("radar.__main__.import_tags", return_value={"validated_results": 1}) as importer, patch(
+                "radar.gemini.send", side_effect=[GeminiUnavailable("503")] * failures +
+                [json.dumps(self.response)]
+            ) as api, patch("radar.gemini.time.sleep") as sleep:
+                result = tag_batch("retry", 1, budget)
+                self.assertEqual(result.get("status", "success"), expected)
+                self.assertEqual(result["api_calls"], min(3, budget))
+                self.assertEqual(api.call_count, min(3, budget))
+                self.assertEqual([c.args[0] for c in sleep.call_args_list], [30, 60])
+                root = Path(folder) / "raw/gemini"
+                raw = json.loads(pq.read_table(root / "retry.parquet").column("payload")[0].as_py())
+                ledger = json.loads(pq.read_table(next((root / "quota").glob("*.parquet"))).column("payload")[0].as_py())
+                self.assertEqual(len(ledger["batches"]), api.call_count)
+                self.assertEqual(len(raw["attempts"]), api.call_count)
+                self.assertNotIn("test-secret", json.dumps(raw))
+                if expected == "success":
+                    self.assertEqual(raw["attempts"][-1]["status"], "response_saved")
+                    self.assertEqual(tag_batch("retry", 1)["api_calls"], 0)
+                else:
+                    importer.assert_not_called()
+                    self.assertTrue(all(a["status"] == "http_503" for a in raw["attempts"]))
+                    if expected == "skipped_503":
+                        replay = tag_batch("retry", 1)
+                        self.assertEqual(replay["domain_ids"], [1])
+                        self.assertEqual(replay["api_calls"], 0)
+                self.assertEqual(api.call_count, min(3, budget))
+
+    def test_failed_batch_skips_to_next_without_exceeding_run_budget(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+            "RADAR_DATA_DIR": folder, "GEMINI_API_KEY": "test-secret",
+        }), patch("radar.__main__.connect"), patch("radar.__main__.prepare_tags") as prepare, patch(
+            "radar.__main__.import_tags", return_value={"validated_results": 1}
+        ) as importer, patch("radar.gemini.send") as api, patch("radar.gemini.time.sleep"):
+            other = make_request("preliminary", [{"domain_id": 2, "domain": "other.example",
+                                                  "url": "https://other.example"}])
+            prepare.side_effect = [self.request, other, self.request]
+            response = copy.deepcopy(self.response)
+            response["candidates"][0]["content"]["parts"][0]["text"] = json.dumps({
+                "results": [{**self.result, "domain_id": 2}]})
+            api.side_effect = [GeminiUnavailable("503")] * 3 + [json.dumps(response), GeminiUnavailable("503")]
+            result = tag_pending("skip", max_requests=4, limit=1)
+            self.assertEqual(result, {"completed_batches": 1, "skipped_batches": 1,
+                                      "api_calls": 4, "status": "run_limit_reached"})
+            self.assertEqual(prepare.call_args_list[1].args, ("preliminary", 1, [1]))
+            self.assertEqual(importer.call_args.args[0], other)
+            # New run can revisit failed domains; max_requests=1 also bounds retries.
+            result = tag_pending("next-run", max_requests=1, limit=1)
+            self.assertEqual(result["api_calls"], 1)
+            self.assertEqual(result["skipped_batches"], 1)
+            self.assertEqual(prepare.call_args.args, ("preliminary", 1, []))
+            self.assertEqual(api.call_count, 5)
 
     def test_budget_counts_reservations_and_survives_restart(self):
         with tempfile.TemporaryDirectory() as folder:

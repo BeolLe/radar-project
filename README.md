@@ -149,9 +149,13 @@ uv run --env-file .env python -m radar prepare-tags --phase detail --limit 20 > 
 
 `prepare-tags` 자체는 offline 요청 초안입니다. 실제 1차 worker는 아래 `tag-batch` / `tag-pending`을 사용합니다. 상세 URL Context 자동 실행·초기 모집단 고정·1차 종료 후 2차 전환·별도 서비스 상세정보 테이블은 아직 구현하지 않았습니다. unknown 이력은 자동 무한 재시도하지 않으며 재점검 정책도 후속 구현입니다.
 
-### 실제 1차 분류 — pipeline:v0.4.1 배포 준비
+### 실제 1차 분류 — pipeline:v0.4.1
 
-v0.4.1은 최신 국가 목록 우선순위와 503 재시도를 추가합니다. web:v0.2.1은 표시 문구 변경입니다. 두 이미지의 빌드·push를 확인한 후에만 태깅 DAG / 웹 Deployment의 이미지 참조를 올립니다. 현재 매니페스트는 기존 이미지로 유지하며 DB 스키마 변경은 없습니다.
+v0.4.1은 최신 국가 목록 우선순위와 503 재시도를 추가합니다. web:v0.2.1은 표시 문구 변경입니다. 2026-09-28 사용자 로그에서 두 이미지 빌드·GHCR push와 웹 테스트 성공을 확인해 태깅 DAG / 웹 Deployment의 참조를 갱신했습니다. 운영 반영은 Airflow git-sync 및 ArgoCD 수동 Sync 후 확인해야 합니다. DB 스키마 변경은 없습니다.
+
+- pipeline:v0.4.1 digest: `sha256:1da5b33ec7b5dc041de255b422af3a15dc45a3dd712aabb1a8d14b9ec5df2244`
+- web:v0.2.1 digest: `sha256:7efe05ce1c59ebee368bfd39a95699e85f9e7d3d60cf5b6c0196d2314fa33e19`
+- 롤백: 태깅 DAG를 pause하고 실행 중 작업 종료를 확인한 뒤 태깅 이미지를 v0.4.0, 웹을 v0.2.0으로 되돌립니다. 기존 DB/raw/예산 장부는 보존합니다.
 
 CLI 직접 실행은 `GEMINI_API_KEY`, `DATABASE_URL`, 영속 `RADAR_DATA_DIR`가 필요합니다. Airflow 운영은 기존 Variable **`gemini_api_key`**를 태스크 실행 시 읽고, Pod 시작 콜백에서 인증된 Kubernetes attach 표준입력 스트림으로 전달합니다. Gemini용 Secret은 만들지 않습니다. 키를 Pod spec·명령 인자·템플릿·XCom·파일에 넣지 않으며 Pod 프로세스 메모리의 환경변수로만 사용합니다. 기존 44개 태그 계약과 DB를 재사용하므로 스키마 변경 및 웹 이미지 교체는 없습니다.
 

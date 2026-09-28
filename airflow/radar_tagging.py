@@ -24,7 +24,39 @@ os.environ['GEMINI_API_KEY'] = key
 del key
 print('RADAR_KEY_READY', flush=True)
 sys.argv = ['radar', *sys.argv[1:]]
-runpy.run_module('radar', run_name='__main__')
+try:
+    runpy.run_module('radar', run_name='__main__')
+except Exception as failure:
+    # v0.4.0 suppresses HTTPError display, but retains it as __context__.
+    # Inspect that response without another API call or a pipeline image rebuild.
+    from urllib.error import HTTPError
+    error = failure
+    for _ in range(10):
+        if isinstance(error, HTTPError):
+            try:
+                body = error.read(16384).decode('utf-8', errors='replace')
+                try:
+                    detail = json.loads(body).get('error', {})
+                    if not isinstance(detail, dict):
+                        detail = {}
+                except (ValueError, AttributeError):
+                    detail = {'message': 'Non-JSON error response; body omitted'}
+                def safe(value):
+                    return str(value).replace(os.environ['GEMINI_API_KEY'], '[REDACTED]')[:1200]
+                report = {'event': 'gemini_http_error', 'http': error.code,
+                          'status': safe(detail.get('status', '')),
+                          'message': safe(detail.get('message', '')),
+                          'content_type': safe(error.headers.get('Content-Type', '')),
+                          'server': safe(error.headers.get('Server', '')),
+                          'retry_after': safe(error.headers.get('Retry-After', ''))}
+                print(json.dumps(report, ensure_ascii=True), flush=True)
+            except Exception:
+                print('GEMINI_ERROR_DETAIL_UNAVAILABLE', flush=True)
+            break
+        error = error.__cause__ or error.__context__
+        if error is None:
+            break
+    raise
 """
 
 

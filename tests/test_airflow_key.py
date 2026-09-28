@@ -97,6 +97,40 @@ runpy.run_module = check
             self.assertNotIn("RADAR_KEY_READY", run.stdout)
             self.assertIn("Invalid Airflow credential payload", run.stderr)
 
+    def test_bootstrap_reports_original_http_error_without_retry_or_key(self):
+        dag, _, _ = self.load_dag()
+        wrapper = """
+import io, json, os, runpy
+from urllib.error import HTTPError
+from unittest.mock import patch
+from radar.gemini import send
+calls = 0
+def fail(*args, **kwargs):
+    global calls
+    calls += 1
+    assert calls == 1
+    body = json.dumps({'error': {'status': 'UNAVAILABLE',
+        'message': 'Service unavailable: ' + os.environ['GEMINI_API_KEY'],
+        'details': {'private': os.environ['GEMINI_API_KEY']}}}).encode()
+    raise HTTPError('https://generativelanguage.googleapis.com', 503, 'Unavailable',
+                    {'Content-Type': 'application/json', 'Retry-After': '60'}, io.BytesIO(body))
+def check(*args, **kwargs):
+    with patch('radar.gemini.urlopen', side_effect=fail):
+        send({}, os.environ['GEMINI_API_KEY'])
+runpy.run_module = check
+""" + dag["BOOTSTRAP"]
+        run = subprocess.run([sys.executable, "-c", wrapper], input='"synthetic-private-value"\n',
+                             capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(run.returncode, 0)
+        report = json.loads(run.stdout.splitlines()[1])
+        self.assertEqual(report["event"], "gemini_http_error")
+        self.assertEqual(report["http"], 503)
+        self.assertEqual(report["status"], "UNAVAILABLE")
+        self.assertEqual(report["retry_after"], "60")
+        self.assertIn("[REDACTED]", report["message"])
+        self.assertNotIn("synthetic-private-value", run.stdout + run.stderr)
+        self.assertNotIn("details", report)
+
 
 if __name__ == "__main__":
     unittest.main()

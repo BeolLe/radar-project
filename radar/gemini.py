@@ -18,13 +18,14 @@ class GeminiUnavailable(RuntimeError):
 
 
 def api_payload(request: dict) -> dict:
-    ids = [domain["domain_id"] for domain in request["domains"]]
+    # v0.4.2's ID enum / fixed array length received HTTP 400 in production.
+    # Keep the previously accepted wire schema; validate exact IDs after generation.
     schema = {
         "type": "object", "required": ["results"],
-        "properties": {"results": {"type": "array", "minItems": len(ids), "maxItems": len(ids), "items": {
+        "properties": {"results": {"type": "array", "items": {
             "type": "object", "required": ["domain_id", "status", "tags", "reason"],
             "properties": {
-                "domain_id": {"type": "integer", "enum": ids},
+                "domain_id": {"type": "integer"},
                 "status": {"type": "string", "enum": ["classified", "unknown"]},
                 "reason": {"type": "string", "maxLength": 300},
                 "tags": {"type": "array", "maxItems": 6, "items": {

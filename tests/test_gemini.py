@@ -32,8 +32,9 @@ class GeminiTests(unittest.TestCase):
         self.assertNotIn("tools", payload)
         self.assertEqual(payload["generationConfig"]["responseMimeType"], "application/json")
         schema = payload["generationConfig"]["responseJsonSchema"]["properties"]["results"]
-        self.assertEqual((schema["minItems"], schema["maxItems"]), (1, 1))
-        self.assertEqual(schema["items"]["properties"]["domain_id"], {"type": "integer", "enum": [1]})
+        self.assertNotIn("minItems", schema)
+        self.assertNotIn("maxItems", schema)
+        self.assertEqual(schema["items"]["properties"]["domain_id"], {"type": "integer"})
         self.assertIn("web or ws", payload["systemInstruction"]["parts"][0]["text"])
         envelope = normalize(self.request, json.dumps(self.response), self.timestamp)
         self.assertEqual(envelope["api_metadata"]["model_version"], "actual-model-version")
@@ -148,8 +149,9 @@ class GeminiTests(unittest.TestCase):
             self.assertEqual([r["domain_id"] for r in importer.call_args.args[1]["results"]], ids)
             self.assertEqual(api.call_args_list[0].args[0], api.call_args_list[1].args[0])
             schema = api.call_args.args[0]["generationConfig"]["responseJsonSchema"]["properties"]["results"]
-            self.assertEqual(schema["items"]["properties"]["domain_id"]["enum"], ids)
-            self.assertEqual((schema["minItems"], schema["maxItems"]), (100, 100))
+            self.assertEqual(schema["items"]["properties"]["domain_id"], {"type": "integer"})
+            self.assertNotIn("minItems", schema)
+            self.assertNotIn("maxItems", schema)
             sleep.assert_called_once_with(30)
             raw = json.loads(pq.read_table(Path(result["raw"])).column("payload")[0].as_py())
             self.assertEqual(raw["attempts"][0]["response"], wrong_body)

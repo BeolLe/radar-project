@@ -1,6 +1,6 @@
 """Copy this standalone DAG file into the existing airflow-practice git-sync repo.
 
-Prerequisites: radar namespace RBAC/Secrets/PVC, pipeline:v0.3.1 image,
+Prerequisites: radar namespace RBAC/Secrets/PVC, pipeline:v0.3.2 image,
 and the radar_collection pool with one slot. Enable only after an import check.
 """
 from datetime import datetime, timedelta, timezone
@@ -34,7 +34,7 @@ for dag_id, schedule, arguments, memory in (
             name=dag_id.replace("_", "-"),
             namespace="radar",
             in_cluster=True,
-            image="ghcr.io/beolle/radar-project-pipeline:v0.3.1",
+            image="ghcr.io/beolle/radar-project-pipeline:v0.3.2",
             cmds=["python", "-m", "radar"],
             arguments=arguments,
             pool="radar_collection",

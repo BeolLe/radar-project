@@ -69,6 +69,20 @@ class PostgresTests(unittest.TestCase):
                                        (first["domain_id"],)).fetchone()
                 self.assertEqual(current[0], "detail")
                 self.assertEqual(current[1][0]["code"], "topic.news")
+            # All provider entries, including single labels, reach core unchanged.
+            weekly = copy.deepcopy(snapshots[0])
+            weekly["date"] = "2026-01-26"
+            names = {"web", "ws", "run.app", "api.example.com"}
+            for source in weekly["sources"]:
+                source["rows"] = [{"domain": name} for name in sorted(names)]
+                source["expected_rows"] = len(names)
+            published = ingest(weekly)
+            self.assertEqual(ingest(weekly)["status"], "already_published")
+            with connect() as conn:
+                found = conn.execute("SELECT d.name FROM core.observation o "
+                                     "JOIN core.domain d ON d.id=o.domain_id WHERE o.snapshot_id=%s",
+                                     (published["snapshot_id"],)).fetchall()
+                self.assertEqual({row[0] for row in found}, names)
 
 
 if __name__ == "__main__":

@@ -7,11 +7,11 @@ BUCKETS = (100_000, 200_000, 500_000, 1_000_000)
 FULL_BUCKETS = (200, 500, 1_000, 2_000, 5_000, 10_000, 20_000, 50_000, *BUCKETS)
 
 
-def domain_name(value: str) -> str:
+def domain_name(value: str, *, allow_single_label: bool = False) -> str:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ValueError("Domain must be a nonempty hostname without whitespace")
     value = value.rstrip(".").encode("idna").decode("ascii").lower()
-    if len(value) > 253 or "." not in value:
+    if len(value) > 253 or (not allow_single_label and "." not in value):
         raise ValueError("Expected a public-style hostname, not a URL")
     try:
         ipaddress.ip_address(value)
@@ -56,7 +56,8 @@ def validate_snapshot(payload: dict) -> tuple[dict, list[dict], dict[str, int]]:
             raise ValueError("Source count does not match expected_rows")
         names = set()
         for item in items:
-            name = domain_name(item["domain"])
+            # Weekly provider lists also contain single labels such as web and ws.
+            name = domain_name(item["domain"], allow_single_label=kind == "weekly")
             if name in names:
                 raise ValueError("Duplicate domain inside one source")
             names.add(name)

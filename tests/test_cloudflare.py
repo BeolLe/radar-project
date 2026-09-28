@@ -116,8 +116,9 @@ class CloudflareTests(unittest.TestCase):
         for body in (b"rank,domain\n1,a.example\n", b"domain\n", b"domain\na.example,extra\n"):
             with self.assertRaises(ValueError):
                 cloudflare.bucket_rows(body, 1)
+        self.assertEqual(len(cloudflare.bucket_rows(b"domain\na.example\nb.example\n", 1)), 2)
         with self.assertRaises(ValueError):
-            cloudflare.bucket_rows(b"domain\na.example\nb.example\n", 1)
+            cloudflare.bucket_rows(b"domain\na.example\n", 2)
         # Scale only fixture counts; exercise the real twelve-bucket payload validator.
         with patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": "synthetic-token"}), patch(
             "radar.cloudflare.request_json", return_value=catalog()
@@ -138,6 +139,61 @@ class CloudflareTests(unittest.TestCase):
         payload["sources"][1]["rows"] = [{"domain": "other.example"}]
         with self.assertRaises(ValueError):
             validate_snapshot(payload)
+
+    def test_weekly_excess_and_single_labels_are_preserved(self):
+        # Scaled fixture reproduces excess rows and the observed single labels.
+        body = b"domain\nws\nrun.app\napi.example.com\nweb\n"
+        parse_rows = cloudflare.bucket_rows
+        with patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": "synthetic-token"}), patch(
+            "radar.cloudflare.weekly_plan", return_value=catalog()["result"]["datasets"]
+        ), patch("radar.cloudflare.request_bytes", return_value=body), patch(
+            "radar.cloudflare.bucket_rows", side_effect=lambda data, bucket: parse_rows(data, 3)
+        ), patch("sys.stdout", new_callable=StringIO) as output:
+            payload = cloudflare.collect_weekly("2026-01-20")
+        self.assertIn('"rows": 4', output.getvalue())
+        for source in payload["sources"]:
+            self.assertEqual(source["expected_rows"], 4)
+            self.assertEqual(source["bucket"], source["catalog"]["meta"]["top"])
+        _, rows, values = validate_snapshot(payload)
+        self.assertEqual(len(rows), 48)
+        self.assertEqual(values, {"web": 200, "ws": 200, "run.app": 200, "api.example.com": 200})
+        with tempfile.TemporaryDirectory(prefix="radar-weekly-raw-") as directory, patch.dict(
+            os.environ, {"RADAR_DATA_DIR": directory}
+        ):
+            restored = read_archive(archive(payload, digest(payload)), digest(payload))
+            self.assertEqual(restored, payload)
+            self.assertEqual(validate_snapshot(restored)[2], values)
+        for mutate in (
+            lambda p: p["sources"][0]["rows"].pop(),
+            lambda p: p["sources"][1]["rows"][0].update(domain="other.example"),
+            lambda p: p["sources"][0]["rows"][0].update(domain="run.app"),
+            lambda p: p["sources"][0]["rows"][0].update(domain="bad name"),
+            lambda p: p["sources"][0]["rows"][0].update(domain="127.0.0.1"),
+        ):
+            invalid = copy.deepcopy(payload)
+            mutate(invalid)
+            with self.assertRaises(ValueError):
+                validate_snapshot(invalid)
+
+    def test_weekly_exact_size_payload_hash_is_unchanged(self):
+        legacy = {"kind": "weekly", "date": "2026-01-19", "location": "WORLD",
+                  "period_start": "2026-01-12", "sources": []}
+        for item in catalog()["result"]["datasets"][:1]:
+            bucket = item["meta"]["top"]
+            legacy["sources"].append({"id": f"cloudflare-dataset-{item['id']}", "bucket": bucket,
+                "expected_rows": bucket, "rows": [{"domain": f"d{i}.example"} for i in range(bucket)],
+                "catalog": item})
+        # Avoid a million-domain fixture in the normal suite: test one catalog source
+        # through the adapter, with full-set validation covered by the other tests.
+        item = catalog()["result"]["datasets"][0]
+        body = ("domain\n" + "\n".join(row["domain"] for row in legacy["sources"][0]["rows"]) + "\n").encode()
+        legacy["sources"][0]["rows"].sort(key=lambda row: row["domain"])
+        with patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": "synthetic-token"}), patch(
+            "radar.cloudflare.weekly_plan", return_value=[item]
+        ), patch("radar.cloudflare.request_bytes", return_value=body), patch(
+            "radar.cloudflare.validate_snapshot"
+        ), patch("sys.stdout", new_callable=StringIO):
+            self.assertEqual(digest(cloudflare.collect_weekly("2026-01-20")), digest(legacy))
 
     def test_location_pagination_waits_for_empty_page(self):
         pages = [{"success": True, "result": {"locations": rows}}

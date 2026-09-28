@@ -107,6 +107,20 @@ class PipelineTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 domain_name(value)
 
+    def test_single_labels_are_weekly_only(self):
+        for name in ("web", "ws"):
+            with self.assertRaises(ValueError):
+                domain_name(name)
+            daily = list(demo_snapshots())[-1]
+            daily["sources"][0]["rows"][0]["domain"] = name
+            with self.assertRaises(ValueError):
+                validate_snapshot(daily)
+        weekly = next(demo_snapshots())
+        for source in weekly["sources"]:
+            source["rows"].append({"domain": "web"})
+            source["expected_rows"] += 1
+        self.assertIn("web", validate_snapshot(weekly)[2])
+
     def test_parquet_roundtrip(self):
         payload = next(demo_snapshots())
         payload["sources"][0]["rows"][0]["categories"] = [{"name": "Example category"}]

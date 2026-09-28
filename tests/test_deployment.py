@@ -39,7 +39,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(config["pool"], "radar_collection")
             self.assertFalse(config["deferrable"])
             self.assertFalse(config["do_xcom_push"])
-            self.assertEqual(config["image"], "ghcr.io/beolle/radar-project-pipeline:v0.3.1")
+            self.assertEqual(config["image"], "ghcr.io/beolle/radar-project-pipeline:v0.3.2")
             spec = config["pod_template_dict"]["spec"]
             self.assertFalse(spec["automountServiceAccountToken"])
             self.assertEqual(spec["imagePullSecrets"], [{"name": "radar-ghcr"}])

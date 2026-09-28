@@ -234,6 +234,7 @@ def weekly_plan(token: str, as_of: str) -> list[dict]:
 
 
 def bucket_rows(body: bytes, expected: int) -> list[dict]:
+    """Keep all rows; bucket size is a minimum check, not an exact row count."""
     reader = csv.DictReader(StringIO(body.decode("utf-8-sig")), strict=True)
     if reader.fieldnames != ["domain"]:
         raise ValueError("Expected a single domain column in weekly CSV")
@@ -242,10 +243,8 @@ def bucket_rows(body: bytes, expected: int) -> list[dict]:
         if set(row) != {"domain"} or not row["domain"]:
             raise ValueError("Malformed weekly CSV row")
         rows.append(row)
-        if len(rows) > expected:
-            raise ValueError("Weekly CSV exceeds its declared bucket size")
-    if len(rows) != expected:
-        raise ValueError("Weekly CSV count differs from its declared bucket size")
+    if len(rows) < expected:
+        raise ValueError("Weekly CSV has fewer rows than its declared bucket size")
     return sorted(rows, key=lambda row: row["domain"])
 
 
@@ -257,9 +256,12 @@ def collect_weekly(as_of: str) -> dict:
         bucket, dataset_id = item["meta"]["top"], item["id"]
         print(json.dumps({"event": "weekly_fetch", "bucket": bucket, "dataset_id": dataset_id}), flush=True)
         body = request_bytes(token, f"/datasets/{dataset_id}", {}, max_bytes=bucket * 260 + 1024)
+        rows = bucket_rows(body, bucket)
         sources.append({"id": f"cloudflare-dataset-{dataset_id}", "bucket": bucket,
-                        "expected_rows": bucket, "rows": bucket_rows(body, bucket),
+                        "expected_rows": len(rows), "rows": rows,
                         "catalog": item})
+        print(json.dumps({"event": "weekly_fetched", "bucket": bucket, "dataset_id": dataset_id,
+                          "rows": len(rows), "row_delta": len(rows) - bucket}), flush=True)
         del body
     payload = {"kind": "weekly", "date": plan[0]["meta"]["targetDateEnd"], "location": "WORLD",
                "period_start": plan[0]["meta"]["targetDateStart"], "sources": sources}

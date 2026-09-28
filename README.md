@@ -495,17 +495,26 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 
 주간은 최근 catalog 100개 안에서 **정확히 지정된 주간**을 찾습니다. API 정렬에 기대어 첫 파일을 선택하지 않습니다. 과거 백필·100개 밖의 주차는 지원하지 않고 명시적으로 실패합니다. 각 파일은 이동하는 alias 대신 숫자 dataset ID로 다운로드하며, 제목·설명·기간 등 catalog 메타데이터를 raw에 보존합니다.
 
+`v0.3.2` 주간 수집 수정:
+
+- 사용자 계정의 2026-09-14~21 자료에서 Top 50만 CSV는 500,004행, Top 100만 CSV는 1,000,001행이었습니다. 초과 이유가 동순위인지는 확인되지 않았으며 순위를 임의로 부여하거나 초과분을 자르지 않습니다.
+- `bucket`/catalog의 `meta.top`은 공급자 구간 기준값으로 보존하고, `expected_rows`는 실제 파싱한 행 수를 기록하여 Parquet 재읽기·정제 시 동일한 수인지 검사합니다. 기존에 정확히 N행인 payload의 해시는 바뀌지 않습니다. 실제 행 수 기록 자체가 원본 완전성을 증명하는 것은 아닙니다.
+- 주간의 정상 단일 라벨(`web`, `ws` 등)을 허용하여 raw와 stage/core에 모두 남깁니다. `run.app`·API 도메인도 유지합니다. 격리·제외 테이블은 만들지 않습니다. 일간 이름 검증, URL/IP/잘못된 이름 거부, 한 파일 내 중복 거부, 전체 버킷 포함 관계 검사는 유지합니다.
+- N행 미만 파일은 부분 다운로드 가능성을 배제할 수 없어 계속 실패시킵니다. 이 최소 행 수는 프로젝트의 보수적 보호 규칙이며 공식적인 완전성 보장은 아닙니다. 기존 HTTP 응답 바이트 상한도 유지하며, 상한 초과 파일을 조용히 잘라 적재하지 않습니다.
+- `weekly_fetched` 로그에 구간 기준값·실제 행 수·차이를 표시합니다. 이 로그는 다운로드/파싱 완료이며 DB 적재 성공은 마지막 `published` 또는 `already_published`로 확인합니다. 동일 도메인의 여러 구간 관측은 기존대로 가장 작은 구간에 통합됩니다.
+- DB 스키마·웹·태깅 기능은 변경하지 않습니다. 로컬 회귀 검사는 합성 자료 기준이고, 실제 PostgreSQL 적재·새 이미지 실행은 서버 확인이 별도로 필요합니다. 이미지 push 완료 후에만 Airflow 저장소의 DAG를 갱신합니다.
+
 #### 이미지와 권한 준비 — Ubuntu
 
 ```bash
 cd /mnt/data/ronny-project/radar-project
 git pull --ff-only
-docker build -f Dockerfile.pipeline -t ghcr.io/beolle/radar-project-pipeline:v0.3.1 .
+docker build -f Dockerfile.pipeline -t ghcr.io/beolle/radar-project-pipeline:v0.3.2 .
 docker run --rm --read-only --tmpfs /tmp \
   --mount "type=bind,src=$PWD/tests,dst=/tests,readonly" \
-  --entrypoint python ghcr.io/beolle/radar-project-pipeline:v0.3.1 \
+  --entrypoint python ghcr.io/beolle/radar-project-pipeline:v0.3.2 \
   -m unittest discover -s /tests -p test_cloudflare.py -v
-docker push ghcr.io/beolle/radar-project-pipeline:v0.3.1
+docker push ghcr.io/beolle/radar-project-pipeline:v0.3.2
 ```
 
 Argo CD의 `radar` Application을 수동 Sync하여 `k8s/airflow-rbac.json`의 Role/RoleBinding을 반영합니다. 권한은 `radar` namespace의 Pod 생성·조회·로그·정리와 이벤트 조회뿐입니다. Secret 조회, 다른 namespace 권한, ClusterRole은 추가하지 않습니다.
@@ -534,7 +543,7 @@ UI에서 `radar_daily`, `radar_weekly`와 pool을 확인한 뒤 최초 실행도
 
 ## 개인 서버 배포 전 남은 작업
 
-1. v0.3.1 빌드·검사·push 후 Airflow DAG 이미지 갱신, 전체 지역 재수집 및 주간 첫 실수집 검증
+1. v0.3.2 빌드·검사·push 후 Airflow DAG 이미지 갱신, 주간 첫 실적재 검증
 2. Gemini 실제 호출 adapter, 공통 일일 예산·재시도·작업 선점·초기 모집단 관리
 3. 첫 실행 후 스케줄 활성화, 장애 알림, DB 백업과 복구 확인
 4. 실제 수집 데이터의 외부 화면 확인, 장비 기준 부하 검사

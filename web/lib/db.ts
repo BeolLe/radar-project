@@ -10,6 +10,7 @@ export const signalNames: Record<string, string> = {
 export type Tag = { code: string; confidence: number };
 export type Ranking = QueryResultRow & {
   id: string; name: string; value: number; signals: string[]; tags: Tag[] | null; phase: string | null;
+  tag_status: string | null;
 };
 
 export async function query<T extends QueryResultRow>(sql: string, values: unknown[] = []): Promise<T[]> {

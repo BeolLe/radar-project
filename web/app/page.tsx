@@ -1,4 +1,6 @@
 import Link from "next/link";
+import AutoRefresh from "./auto-refresh";
+import { tagState } from "../lib/tag-state";
 import { filters, one, query, signalNames, tagNames, type Params, type Ranking } from "../lib/db";
 
 export const dynamic = "force-dynamic";
@@ -23,6 +25,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
       // ponytail: OFFSET pagination for the draft; use keyset pagination for deep browsing.
       rows = await query<Ranking>(`
         SELECT d.id,d.name,o.value,t.tags,t.phase,
+          COALESCE(t.status,(SELECT status FROM core.tag_result WHERE domain_id=d.id
+                             ORDER BY imported_at DESC,id DESC LIMIT 1)) AS tag_status,
           ARRAY(SELECT signal FROM mart.domain_signal WHERE snapshot_id=o.snapshot_id AND domain_id=d.id) AS signals
         FROM core.observation o JOIN core.domain d ON d.id=o.domain_id
         LEFT JOIN mart.current_tag t ON t.domain_id=d.id
@@ -40,6 +44,13 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
     <p className="eyebrow">DOMAIN INTELLIGENCE / 데이터 탐색</p>
     <h1>순위보다, 변화에 집중하세요.</h1>
     <p className="intro">도메인의 관측 이력과 변화 신호를 살펴봅니다. 상세 점검 전 AI 분류는 잠정 결과로 표시됩니다.</p>
+    <aside className="tag-notice" aria-label="태그 분류 안내">
+      <strong>Gemini API 태그를 순차적으로 수집·분류합니다.</strong>
+      <p>한국 → 다른 국가 → 글로벌 전용 도메인 순서로 처리하며, 완료된 태그부터 표시합니다.
+        아직 결과가 없으면 ‘수집·분류 대기’, 판단 근거가 부족하면 ‘분류 보류’로 표시합니다.</p>
+      <small>도메인 역할은 사용자용 사이트·앱, API·백엔드, CDN 등으로 구분합니다. 이름의 api·app만으로 단정하지 않습니다. 점수는 모델의 자기평가입니다.</small>
+    </aside>
+    <AutoRefresh />
     <form className="filters" method="get">
       <label>자료<select name="kind" defaultValue={kind}><option value="weekly">글로벌 주간 구간</option><option value="daily">일간 정확 순위</option></select></label>
       <label>국가<select name="location" defaultValue={location}><option value="WORLD">글로벌</option>{locations.filter(l => l.location !== "WORLD").map(l => <option key={l.location}>{l.location}</option>)}</select></label>
@@ -50,13 +61,16 @@ export default async function Home({ searchParams }: { searchParams: Promise<Par
     </form>
     {problem ? <section className="empty" role="status"><h2>연결을 기다리고 있습니다</h2><p>{problem}</p><p>샘플 자료를 자동으로 실제 데이터처럼 보여주지 않습니다.</p></section> : <>
       <div className="section-head"><h2>{kind === "weekly" ? "글로벌 순위 구간" : `${location} 일간 순위`}</h2><span>{selected?.day ?? "자료 없음"} · {page * 50 + 1}번째부터</span></div>
-      <div className="table-wrap"><table><thead><tr><th>{kind === "weekly" ? "구간 상한" : "순위"}</th><th>도메인</th><th>변화 신호</th><th>AI 태그 / 점검 상태</th></tr></thead>
+      <div className="table-wrap"><table><thead><tr><th>{kind === "weekly" ? "구간 상한" : "순위"}</th><th>도메인</th><th>변화 신호</th><th>도메인 역할</th><th>Gemini API 태그 / 점검 상태</th></tr></thead>
         <tbody>{rows.slice(0, 50).map(row => <tr key={row.id}>
           <td>{kind === "weekly" ? "≤ " : ""}{row.value.toLocaleString("ko-KR")}</td>
           <td><Link className="domain" href={`/domain/${row.id}?kind=${kind}&location=${location}`}>{row.name}</Link></td>
           <td>{row.signals.length ? row.signals.map(s => <span className="chip" key={s}>{signalNames[s] ?? s}</span>) : <span className="muted">—</span>}</td>
-          <td>{row.tags?.map(t => <span className="chip neutral" key={t.code}>{tagNames[t.code] ?? t.code} · {t.confidence.toFixed(2)}</span>)}
-            <small>{row.phase === "detail" ? "URL 기반 AI 점검 완료" : row.phase ? "AI 잠정 분류 · URL 미확인" : "미분류"}</small></td>
+          <td>{row.tags?.some(t => t.code.startsWith("role."))
+            ? row.tags.filter(t => t.code.startsWith("role.")).map(t => <span className="chip role" key={t.code}>{tagNames[t.code] ?? t.code} · {t.confidence.toFixed(2)}</span>)
+            : <span className="muted">역할 미확인</span>}</td>
+          <td>{row.tags?.filter(t => !t.code.startsWith("role.")).map(t => <span className="chip neutral" key={t.code}>{tagNames[t.code] ?? t.code} · {t.confidence.toFixed(2)}</span>)}
+            <small>{tagState(row.phase, row.tag_status)}</small></td>
         </tr>)}</tbody></table></div>
       {!rows.length && <p className="empty">조건에 맞는 완료 자료가 없습니다. 처음 실행했다면 demo 명령으로 가상 데이터를 넣을 수 있습니다.</p>}
       <nav className="pagination" aria-label="페이지 이동">{page > 0 && <Link href={link(page - 1)}>← 이전</Link>}<span>{page + 1} 페이지</span>{rows.length > 50 && <Link href={link(page + 1)}>다음 →</Link>}</nav>

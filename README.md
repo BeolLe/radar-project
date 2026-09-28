@@ -128,6 +128,16 @@ uv run --env-file .env python -m radar ingest demo-input.json
 
 ## 두 단계 태깅
 
+### 화면 표시와 갱신 — web:v0.2.0
+
+목록과 도메인 상세 화면은 15초마다 현재 경로를 다시 조회합니다. 숨긴 탭 및 검색 입력 중에는 자동 갱신을 쉬고, `지금 업데이트` 버튼으로 직접 확인할 수 있습니다. DB 적재 후 다음 갱신에 반영되는 polling 방식이지 WebSocket 즉시 전송은 아닙니다. DB 오류를 성공 또는 최신 확인으로 표시하지 않습니다.
+
+결과가 없는 도메인은 `태그 수집·분류 대기`, unknown은 `분류 보류 · 근거 부족`, fetch_failed는 `URL 조회 실패 · 재점검 필요`로 표시합니다. 이는 개별 도메인의 결과 상태이며 실제 worker가 지금 실행 중임을 보증하는 상태판은 아닙니다. 목록에서는 기존 성공 결과가 있으면 계속 우선 표시하고, 상세 이력에서 후속 실패/보류를 확인할 수 있습니다.
+
+기존 `role.*` 태그를 목록의 **도메인 역할** 열에 따로 표시합니다. 사용자용 사이트·앱 / API·백엔드 / CDN·정적 리소스 / 광고·측정 / 인증·서비스 연동 / 주차·판매 도메인을 재사용하며 taxonomy 변경이나 pipeline 이미지 재빌드는 필요 없습니다. `api`, `app` 문자열만으로 역할을 강제하지 않습니다. 앱 자체와 앱의 API는 다른 역할일 수 있고, 현재 분류체계는 사용자용 웹사이트와 앱을 하나의 역할로 묶습니다.
+
+검사: `cd web && npm test && npm run typecheck && npm run build`. [Next.js router.refresh 문서](https://nextjs.org/docs/app/api-reference/functions/use-router)에 따라 동적 페이지의 DB 결과를 갱신하며 현재 URL의 필터·페이지를 유지합니다. 배포는 web:v0.2.0 빌드·push 확인 후 웹 Deployment 이미지만 변경합니다.
+
 ### 요청 준비 — API 호출 없음
 
 ```sh

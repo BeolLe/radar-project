@@ -138,11 +138,24 @@ def prepare_tags(phase: str, limit: int) -> dict:
         raise ValueError(f"Limit for {phase} must be 1..{LIMITS[phase]}")
     with connect() as conn:
         # Unknown attempts are not silently retried forever. They need explicit later review.
+        # Any observed KR membership wins, then other countries; global-only fills the rest.
         rows = conn.execute("""
-          SELECT d.id,d.name FROM core.domain d WHERE NOT EXISTS (
+          SELECT d.id,d.name FROM core.domain d
+          JOIN core.observation o ON o.domain_id=d.id
+          JOIN core.snapshot s ON s.id=o.snapshot_id
+          WHERE s.kind='daily' AND s.location<>'WORLD' AND NOT EXISTS (
             SELECT 1 FROM core.tag_result t WHERE t.domain_id=d.id AND t.phase=%s
-          ) ORDER BY d.id LIMIT %s
+          ) GROUP BY d.id
+          ORDER BY min(CASE WHEN s.location='KR' THEN 0 ELSE 1 END),min(o.value),d.id
+          LIMIT %s
         """, (phase, limit)).fetchall()
+        if len(rows) < limit:
+            rows += conn.execute("""
+              SELECT d.id,d.name FROM core.domain d WHERE d.id<>ALL(%s::bigint[])
+              AND NOT EXISTS (
+                SELECT 1 FROM core.tag_result t WHERE t.domain_id=d.id AND t.phase=%s
+              ) ORDER BY d.id LIMIT %s
+            """, ([row[0] for row in rows], phase, limit - len(rows))).fetchall()
     if not rows:
         return {"phase": phase, "domains": [], "status": "no_candidates"}
     return make_request(phase, [{"domain_id": row[0], "domain": row[1],
@@ -173,7 +186,8 @@ def import_tags(request: dict, envelope: dict) -> dict:
               ON CONFLICT (result_hash) DO NOTHING
             """, (row["domain_id"], request["phase"], row["status"], request["model"],
                   request["prompt_version"], request["taxonomy_version"], Jsonb(row["tags"]),
-                  Jsonb({"tool": row["evidence"], "reason": row.get("reason", "")}),
+                  Jsonb({"tool": row["evidence"], "reason": row.get("reason", ""),
+                         **({"api": envelope["api_metadata"]} if "api_metadata" in envelope else {})}),
                   row["checked_at"], result_hash))
     return {"validated_results": len(rows), "missing_ids": sorted(
         {d["domain_id"] for d in request["domains"]} - {r["domain_id"] for r in rows})}
@@ -236,6 +250,15 @@ def main():
     load_tags = commands.add_parser("import-tags", help="Import an adapter-normalized response")
     load_tags.add_argument("request", type=Path)
     load_tags.add_argument("response", type=Path)
+    tag = commands.add_parser("tag-batch", help="Run/replay one preliminary Gemini batch, no HTTP retries")
+    tag.add_argument("--batch-id", required=True, help="Unique durable execution ID; reuse to replay without API")
+    tag.add_argument("--limit", type=int, default=100)
+    tag.add_argument("--daily-limit", type=int, default=200)
+    pending = commands.add_parser("tag-pending", help="Preliminary batches with a persistent daily call budget")
+    pending.add_argument("--run-id", required=True)
+    pending.add_argument("--max-requests", type=int, default=200)
+    pending.add_argument("--limit", type=int, default=100)
+    pending.add_argument("--daily-limit", type=int, default=200)
     args = parser.parse_args()
     if args.command == "init-db":
         with connect() as conn, conn.transaction():
@@ -271,6 +294,12 @@ def main():
         result = [ingest(p) for p in demo_snapshots()]
     elif args.command == "prepare-tags":
         result = prepare_tags(args.phase, args.limit or LIMITS[args.phase])
+    elif args.command == "tag-batch":
+        from .gemini import tag_batch
+        result = tag_batch(args.batch_id, args.limit, args.daily_limit)
+    elif args.command == "tag-pending":
+        from .gemini import tag_pending
+        result = tag_pending(args.run_id, args.max_requests, args.limit, args.daily_limit)
     else:
         result = import_tags(json.loads(args.request.read_text()), json.loads(args.response.read_text()))
     print(json.dumps(result, ensure_ascii=False, indent=2, default=str))

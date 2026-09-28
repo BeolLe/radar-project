@@ -83,6 +83,33 @@ class PostgresTests(unittest.TestCase):
                                      "JOIN core.domain d ON d.id=o.domain_id WHERE o.snapshot_id=%s",
                                      (published["snapshot_id"],)).fetchall()
                 self.assertEqual({row[0] for row in found}, names)
+            # Actual DB + Parquet + mocked API: no network/cost in integration tests.
+            from radar.gemini import tag_batch
+            for location, name in (("KR", "run.app"), ("JP", "api.example.com")):
+                ingest({"kind": "daily", "date": "2026-01-27", "location": location,
+                        "sources": [{"id": "priority-" + location, "expected_rows": 1,
+                                     "rows": [{"domain": name, "rank": 1}]}]})
+            pending = prepare_tags("preliminary", 100)
+            ordered = [d["domain"] for d in pending["domains"]]
+            self.assertLess(ordered.index("run.app"), ordered.index("api.example.com"))
+            self.assertLess(ordered.index("api.example.com"), ordered.index("web"))
+            api_response = {"modelVersion": "fixture-version", "candidates": [{
+                "finishReason": "STOP", "content": {"parts": [{"text": json.dumps({
+                    "results": [{"domain_id": d["domain_id"], "status": "unknown",
+                                 "tags": [], "reason": "Synthetic unknown"}
+                                for d in pending["domains"]]})}]}}]}
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "synthetic-test-only"}), patch(
+                "radar.gemini.send", return_value=json.dumps(api_response)
+            ) as api:
+                tagged = tag_batch("integration", 100)
+                self.assertEqual(tag_batch("integration", 100), tagged)
+                self.assertEqual(api.call_count, 1)
+                self.assertEqual(prepare_tags("preliminary", 100)["status"], "no_candidates")
+            with connect() as conn:
+                saved = conn.execute("SELECT evidence->'api'->>'model_version' "
+                                     "FROM core.tag_result WHERE domain_id=%s AND phase='preliminary'",
+                                     (pending["domains"][0]["domain_id"],)).fetchone()
+                self.assertEqual(saved[0], "fixture-version")
 
 
 if __name__ == "__main__":

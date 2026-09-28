@@ -2,20 +2,20 @@
 
 Cloudflare Radar 도메인 순위 이력을 누적하고, 변화 신호와 Gemini 태그를 조회하는 **개인 서버용 프로젝트 초안**입니다.
 
-**현재 상태:** 파일 기반 적재·변화 계산·태그 요청 준비/결과 검증·Next.js 조회를 구현했습니다. Kubernetes 웹·공개 HTTPS와 2026-09-27 WORLD/KR 각 100건 실수집·적재·화면은 사용자 결과로 확인했습니다. 전체 지역 일간 수집, 글로벌 주간 12개 bucket 수집과 Airflow DAG를 추가했습니다. 새 전체 수집 경로는 로컬 합성 테스트 대상이며 **서버 이미지 빌드·DAG 배포·첫 실행은 별도 확인이 필요**합니다. Gemini API 호출 worker는 아직 없습니다.
+**현재 상태:** Kubernetes 웹·공개 HTTPS·Airflow 일간/주간 수집을 사용자 로그로 확인했습니다. 주간 2026-09-21 WORLD는 1,000,001개이며 `web`/`ws`도 core에 보존됐습니다. Gemini 100개 1차 분류 worker와 일일 예산·원본 보존·Airflow DAG를 추가했습니다. **Gemini 새 이미지 배포·실제 API 호출·분류 품질은 아직 서버 검증 전**입니다. 20 URL 상세 점검은 요청/결과 계약만 있습니다.
 
 ## 구성
 
 - Python 3.12+ / uv: 입력 검증, raw Parquet 저장, PostgreSQL 적재
 - PostgreSQL: `stage` → `core` → `mart`
 - Next.js / React: 서버 측 DB 조회, 날짜·국가·태그 필터, 도메인 이력
-- Gemini `gemini-3.1-flash-lite`: 100개 잠정 분류 → 20 URL 상세 점검의 **요청·결과 계약**
+- Gemini `gemini-3.1-flash-lite`: 100개 잠정 분류 worker / 20 URL 상세 점검 요청·결과 계약
 - 초기 태그 44개: 분야 22개, 용도 16개, 도메인 역할 6개
 
 ```text
 완료된 수집 자료(JSON 계약) → raw Parquet → stage 1차 적재
                                       → core/mart 2차 적재 → Next.js 서버 → 브라우저
-                                             └→ 태깅 요청 준비 → [외부 worker 미연결]
+                                             └→ Gemini 1차 분류 → raw Parquet
                                                                → 결과 검증·적재 → 화면
 ```
 
@@ -137,11 +137,33 @@ uv run --env-file .env python -m radar prepare-tags --phase detail --limit 20 > 
 
 요청에는 도메인 ID·이름·URL·44개 허용 코드·프롬프트 규칙이 들어갑니다. 도메인별 1차 완료와 상세 점검 완료를 별도로 취급하므로 1차 태그가 있어도 detail 대상입니다.
 
-**이는 offline 요청 초안이지 동작하는 worker가 아닙니다.** 대상 선점·일일 200요청 예산·초기 모집단 고정·1차 종료 후 2차 전환은 아직 구현하지 않았습니다. 결과 적재 전 같은 명령을 반복하면 같은 대상이 나올 수 있습니다. unknown/실패 이력은 자동 무한 재시도하지 않으며 재점검 정책도 후속 구현입니다.
+`prepare-tags` 자체는 offline 요청 초안입니다. 실제 1차 worker는 아래 `tag-batch` / `tag-pending`을 사용합니다. 상세 URL Context 자동 실행·초기 모집단 고정·1차 종료 후 2차 전환·별도 서비스 상세정보 테이블은 아직 구현하지 않았습니다. unknown 이력은 자동 무한 재시도하지 않으며 재점검 정책도 후속 구현입니다.
+
+### 실제 1차 분류 — pipeline:v0.4.0
+
+`GEMINI_API_KEY`, `DATABASE_URL`, 영속 `RADAR_DATA_DIR`가 필요합니다. 기존 44개 태그 계약과 DB를 재사용하므로 스키마 변경 및 웹 이미지 교체는 없습니다.
+
+```sh
+# 첫 검증: 100개 × 1회. API 키를 명령 인자에 넣지 않습니다.
+uv run --env-file .env python -m radar tag-batch --batch-id preliminary-check-001 --limit 100
+# 자동 worker와 동일한 호출: 최대 200회, 호출 사이 60초 대기
+uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 --max-requests 200
+```
+
+- `gemini-3.1-flash-lite`의 `generateContent` JSON Schema 응답을 사용합니다. Steam의 모델/키 환경변수 규약을 재사용하며, URL Context가 없는 1차 분류라 Interactions 호출 코드를 복사하지 않습니다. 도메인 ID당 결과 한 개, 허용 태그 최대 6개, 신뢰도 0..1을 검사합니다. 누락·잘림·잘못된 태그는 해당 배치 전체 적재를 거부합니다.
+- 대상은 preliminary 이력이 없는 도메인만입니다. **누적 국가 관측 이력에서 한국 → 다른 국가 → 나머지 글로벌 전용 도메인** 순서이며 여러 국가에 겹치면 한국 우선으로 한 번만 처리합니다. 같은 그룹은 관측 최소 순위·도메인 ID 순서입니다(글로벌 전용은 ID 순서). `web`/`ws`도 삭제하지 않고 근거가 부족하면 unknown으로 기록합니다. 사이트를 실제 방문했다는 의미가 아닙니다.
+- DB advisory lock으로 Radar worker 호출을 직렬화합니다. 요청 전 예산을 예약하고, raw/gemini 아래 요청·API 원문·응답 시각을 Parquet로 보존한 다음 기존 DB importer를 호출합니다. 응답의 실제 modelVersion·사용 토큰은 raw와 tag_result.evidence.api에 저장합니다.
+- 같은 batch-id/run-id 재실행은 저장된 응답을 재사용합니다. 응답 저장 전에 종료된 배치는 자동 재호출하지 않습니다. 원인 확인 후 새 ID로 재요청해야 하며, 이전 호출 예산은 환급하지 않습니다. raw/PVC를 삭제하거나 바꾸면 이 보호가 사라집니다.
+- 일일 예산은 미국 태평양 날짜 기준 최대 200회이며, 실패/수동 검증도 포함합니다. 이 장부는 **Radar만** 셉니다. 같은 Google 프로젝트의 다른 앱 사용량은 알 수 없으므로 다시 Steam을 가동하면 예산을 나눠야 합니다. 429/네트워크 오류는 즉시 중단하며 자동 재시도하지 않습니다.
+- `airflow/radar_tagging.py`: 매일 18:00 KST, 최초 paused, retries=0, 기존 radar_collection pool 재사용. 수집 DAG와 직접 성공 의존성은 없고 실행 시 DB에 이미 적재된 도메인을 처리합니다. 첫 수동 Trigger의 `max_requests`는 **1**로 설정하고 결과 확인 후 스케줄을 활성화합니다. 모든 1차 대상 처리 후에는 추가 API 호출 없이 종료합니다.
+
+배포 순서: v0.4.0 이미지 빌드/테스트/GHCR push → radar 네임스페이스의 `radar-gemini` Secret에 `GEMINI_API_KEY` 저장 → Airflow git-sync 저장소에 `radar_tagging.py` 추가 → DAG processor import 확인 → 1회 검증 → 활성화. 기존 수집 DAG 이미지는 바꾸지 않습니다. 키는 채팅·Git·로그에 출력하지 않습니다.
+
+근거: [모델 명세](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite), [구조화 응답](https://ai.google.dev/gemini-api/docs/structured-output), [프로젝트 단위 한도·태평양 자정 초기화](https://ai.google.dev/gemini-api/docs/rate-limits). 200회는 이 프로젝트의 운영 상한이며 Google이 모든 계정에 보장하는 한도가 아닙니다.
 
 ### 결과 검증·적재
 
-향후 Gemini adapter는 SDK 응답을 다음 내부 형식으로 변환해야 합니다. `tool_evidence`는 **모델이 쓴 JSON이 아니라 URL Context 도구 메타데이터에서** 추출해야 합니다. 이 파일 입력만으로 웹을 실제 조회했다고 독립 검증할 수는 없습니다.
+향후 상세 점검 adapter는 API 응답을 다음 내부 형식으로 변환해야 합니다. `tool_evidence`는 **모델이 쓴 JSON이 아니라 URL Context 도구 메타데이터에서** 추출해야 합니다. 이 파일 입력만으로 웹을 실제 조회했다고 독립 검증할 수는 없습니다.
 
 ```json
 {
@@ -543,8 +565,8 @@ UI에서 `radar_daily`, `radar_weekly`와 pool을 확인한 뒤 최초 실행도
 
 ## 개인 서버 배포 전 남은 작업
 
-1. v0.3.2 빌드·검사·push 후 Airflow DAG 이미지 갱신, 주간 첫 실적재 검증
-2. Gemini 실제 호출 adapter, 공통 일일 예산·재시도·작업 선점·초기 모집단 관리
+1. Gemini v0.4.0 빌드·검사·push 후 태깅 DAG 배포, 100개 실제 API/DB 검증
+2. Gemini 상세 URL Context adapter·초기 모집단 관리·별도 도메인 상세정보
 3. 첫 실행 후 스케줄 활성화, 장애 알림, DB 백업과 복구 확인
 4. 실제 수집 데이터의 외부 화면 확인, 장비 기준 부하 검사
 5. 사후 수정·과거 백필 시 영향받는 mart 재계산, 필요하면 별도 migration 체계

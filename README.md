@@ -185,11 +185,11 @@ uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 
 - 구버전의 ID 오류 raw를 같은 batch-id로 읽으면 원본 변경/API 호출 없이 스킵 결과를 반환합니다. 실패 도메인을 재요청하려면 새 DAG 실행을 사용합니다. malformed JSON·잘림·잘못된 태그·DB 오류는 이번 자동 재시도 대상이 아니며 계속 중단합니다.
 - 2026-09-28 사용자 로그에서 pipeline:v0.4.2 빌드·GHCR push 성공을 확인해 태깅 DAG 이미지 참조를 갱신했습니다. digest는 `sha256:6168ecac50e3f571f0e23d8bff7a6a61ec5c6c90deb4c43be06dd42a8bd3c2c9`입니다. Airflow git-sync 반영 및 새 실행의 실제 API 결과는 별도 확인 대상입니다. 웹·DB·Airflow Variable은 변경하지 않습니다. 되돌릴 때는 DAG pause/실행 종료 후 v0.4.1로 복구하고 DB/raw/예산 장부를 보존합니다. 구버전은 ID 오류 raw에서 다시 중단할 수 있습니다.
 
-#### v0.4.3 배포 준비 — 요청 스키마 복구
+#### v0.4.3 — 요청 스키마 복구
 
 - 확인된 운영 오류: v0.4.2 첫 요청이 HTTP 400 `INVALID_ARGUMENT` / `Request contains an invalid argument.`로 거부됐습니다. 응답 ID 검증 전의 요청 실패이며 어떤 필드가 거부됐는지는 오류 메시지에 없습니다. 직전에 추가한 ID enum/결과 길이 제약이 유력하지만 필드별 원인을 확정한 것은 아닙니다.
 - 새 제약을 제거해 성공했던 v0.4.1의 `api_payload` 생성 동작으로 복구합니다. ID 검증·원본 보존·503/ID 오류 제한 재시도·스킵·예산 제한은 v0.4.2 구현 그대로 유지합니다. 400은 설정/요청 오류이므로 재시도하거나 자동 스킵하지 않습니다.
-- 기존 실패 raw/예산/DB는 변경하지 않습니다. v0.4.3 빌드·push 후 태깅 DAG 참조를 갱신하고 새 Trigger로 소량 검증합니다. 현재 DAG는 v0.4.2이며 웹·수집 DAG·키 설정은 바꾸지 않습니다. 운영 성공은 아직 미확인입니다.
+- 기존 실패 raw/예산/DB는 변경하지 않습니다. 사용자 로그에서 v0.4.3 빌드·GHCR push 성공을 확인하고 태깅 DAG 참조를 갱신했습니다. digest는 `sha256:a53abc8c0212ee51a35a0d0fe470b3ccd61a171ce555dccc90fd8922738372e1`입니다. git-sync 반영 후 새 Trigger로 소량 검증하며 웹·수집 DAG·키 설정은 바꾸지 않습니다. 실제 API 복구 성공은 아직 미확인입니다.
 
 배포 순서: v0.4.0 이미지 빌드/테스트/GHCR push → 갱신한 radar RBAC 적용 → Airflow git-sync 저장소에 `radar_tagging.py` 추가 → DAG processor import 확인 → 1회 검증 → 활성화. 기존 Airflow Variable `gemini_api_key`를 그대로 사용하고 수집 DAG 이미지는 바꾸지 않습니다. 키 전달에는 `pipeline/airflow-worker`의 radar namespace **pods/attach get** 권한만 추가합니다. secrets 조회/생성·pods/exec 권한은 추가하지 않습니다. 전달 실패 시 300초 안에 수신 대기가 끝나며 오류는 키 없이 출력합니다. Kubernetes 관리자·프로세스 메모리를 읽을 수 있는 운영자는 이 방식에서도 신뢰 경계 안에 있습니다.
 

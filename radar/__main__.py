@@ -259,12 +259,12 @@ def main():
     tag = commands.add_parser("tag-batch", help="Run/replay one preliminary Gemini batch, no HTTP retries")
     tag.add_argument("--batch-id", required=True, help="Unique durable execution ID; reuse to replay without API")
     tag.add_argument("--limit", type=int, default=100)
-    tag.add_argument("--daily-limit", type=int, default=200)
+    tag.add_argument("--daily-limit", type=int, default=500)
     pending = commands.add_parser("tag-pending", help="Preliminary batches with a persistent daily call budget")
     pending.add_argument("--run-id", required=True)
     pending.add_argument("--max-requests", type=int, default=200)
     pending.add_argument("--limit", type=int, default=100)
-    pending.add_argument("--daily-limit", type=int, default=200)
+    pending.add_argument("--daily-limit", type=int, default=500)
     args = parser.parse_args()
     if args.command == "init-db":
         with connect() as conn, conn.transaction():

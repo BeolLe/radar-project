@@ -162,7 +162,7 @@ CLI 직접 실행은 `GEMINI_API_KEY`, `DATABASE_URL`, 영속 `RADAR_DATA_DIR`�
 ```sh
 # 첫 검증: 100개 × 최대 1회(재시도 포함). API 키를 명령 인자에 넣지 않습니다.
 uv run --env-file .env python -m radar tag-pending --run-id preliminary-check-001 --max-requests 1
-# 자동 worker와 동일한 호출: 최대 200회, 호출 사이 60초 대기
+# 자동 worker와 동일한 호출: 실행당 최대 200회, 일일 총 500회, 호출 사이 60초 대기
 uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 --max-requests 200
 ```
 
@@ -170,11 +170,11 @@ uv run --env-file .env python -m radar tag-pending --run-id preliminary-run-001 
 - 대상은 preliminary 이력이 없는 도메인만입니다. **최신 한국 Top 100 → 다른 국가별 최신 목록 → 나머지 도메인** 순서이며 여러 국가에 겹치면 한국 우선으로 한 번만 처리합니다. 한국은 한국 순위, 다른 국가는 최신 목록 내 최소 순위, 동순위와 나머지 도메인은 ID 순서입니다. 과거 한국 등장 이력이나 외국에서의 높은 순위가 최신 한국 순서를 바꾸지 않습니다. unknown은 이미 분류를 시도한 상태로 자동 재요청하지 않습니다. `web`/`ws`도 삭제하지 않고 근거가 부족하면 unknown으로 기록합니다.
 - DB advisory lock으로 Radar worker 호출을 직렬화합니다. 요청 전 예산을 예약하고, raw/gemini 아래 요청·API 원문·응답 시각을 Parquet로 보존한 다음 기존 DB importer를 호출합니다. 응답의 실제 modelVersion·사용 토큰은 raw와 tag_result.evidence.api에 저장합니다.
 - 같은 batch-id/run-id 재실행은 저장된 응답을 재사용합니다. 응답 저장 전에 종료된 배치는 자동 재호출하지 않습니다. 원인 확인 후 새 ID로 재요청해야 하며, 이전 호출 예산은 환급하지 않습니다. raw/PVC를 삭제하거나 바꾸면 이 보호가 사라집니다.
-- 일일 예산은 미국 태평양 날짜 기준 최대 200회이며, 실패/수동 검증도 포함합니다. 이 장부는 **Radar만** 셉니다. 같은 Google 프로젝트의 다른 앱 사용량은 알 수 없으므로 다시 Steam을 가동하면 예산을 나눠야 합니다. 429/네트워크 오류는 즉시 중단하며 자동 재시도하지 않습니다.
+- 일일 예산은 미국 태평양 날짜 기준 최대 500회이며, 실패/수동 검증도 포함합니다. 이 장부는 **Radar만** 셉니다. 같은 Google 프로젝트의 다른 앱 사용량은 알 수 없으므로 다시 Steam을 가동하면 예산을 나눠야 합니다. 429/네트워크 오류는 즉시 중단하며 해당 실행 안에서 자동 재시도하지 않습니다.
 - **HTTP 503과 ID 불일치를 합쳐 최초 포함 최대 3회** 시도합니다(재시도 대기 30초, 60초; ID 처리는 v0.4.2부터). 매 시도 전에 별도로 예산을 예약합니다. `max_requests`도 성공 배치 수가 아니라 이번 실행의 실제 호출 수 상한이며, 남은 한도보다 많이 재시도하지 않습니다. `tag-batch` 직접 호출에도 최대 3회 규칙이 적용됩니다.
 - 계속 실패하면 마지막 원인에 따라 `skipped_503` 또는 `skipped_id_mismatch`와 대상 ID를 raw에 남기고 **이번 실행에서만** 제외하여 다음 배치로 진행합니다. DB에 가짜 unknown/성공 태그를 넣지 않으며 새 run-id의 다음 실행에서 다시 선정됩니다. 동일 batch-id 재생은 성공 응답 또는 스킵 기록을 재사용해 API를 호출하지 않습니다. 호출 중 강제 종료처럼 응답 여부가 불명확한 기록은 기존처럼 자동 재호출하지 않습니다. 모든 배치가 스킵되어도 루프는 정상 종료할 수 있으므로 로그의 `completed_batches`, `skipped_batches`, `api_calls`를 함께 확인합니다.
 - `airflow/radar_tagging.py`: 매시간 정각(`@hourly`), 최초 paused, retries=0, 기존 radar_collection pool 재사용. `catchup=False`, `max_active_runs=1`로 과거 시간대 일괄 실행과 동시 실행을 막습니다. 이전 실행이나 pool 사용 작업이 끝나지 않았다면 시작이 늦어질 수 있습니다. 수집 DAG와 직접 성공 의존성은 없고 실행 시 DB에 이미 적재된 도메인을 처리합니다. 첫 수동 Trigger의 `max_requests`는 **1**로 설정하고 결과 확인 후 스케줄을 활성화합니다. 모든 1차 대상 처리 후에는 추가 API 호출 없이 종료합니다.
-- 매시간 200회씩 새 예산을 주는 것이 아닙니다. 기본 실행 상한은 200회이지만 수동·자동 실행이 같은 일일 장부를 공유하므로 재시도 포함 하루 총 200회까지만 호출합니다. 소진 후 실행은 `daily_budget_exhausted`로 종료합니다. 태평양 자정에 새 예산을 사용하며 한국 시각으로 서머타임 중 16시, 그 외 17시입니다. RPM·입력 TPM·RPD 실제 한도는 [AI Studio](https://aistudio.google.com/rate-limit)에서 같은 Google 프로젝트의 `gemini-3.1-flash-lite`를 확인해야 합니다. 현재 200회는 기존 운영 상한이지 실계정 한도를 조회한 결과가 아닙니다. 100개 도메인을 한 요청으로 보내는 일반 `generateContent` 호출이며 별도 Gemini Batch API 한도가 적용되는 방식이 아닙니다.
+- 매시간 새 일일 예산을 주는 것이 아닙니다. 기본 실행 상한은 200회이지만 수동·자동 실행이 같은 일일 장부를 공유하므로 재시도 포함 하루 총 500회까지만 호출합니다. 소진 후 실행은 `daily_budget_exhausted`로 종료합니다. 태평양 자정에 새 예산을 사용하며 한국 시각으로 서머타임 중 16시, 그 외 17시입니다. 2026-09-28 사용자 제공 [AI Studio](https://aistudio.google.com/rate-limit) 화면에서 `steam game analysis` 프로젝트의 Gemini 3.1 Flash Lite 무료 한도는 RPM 15·입력 TPM 250,000·RPD 500으로 확인했습니다. 1 Day 화면의 최대 사용량은 각각 1·4.15K·53이며 실시간 잔여량으로 단정하지 않습니다. 100개 도메인을 한 요청으로 보내는 일반 `generateContent` 호출이며 별도 Gemini Batch API 한도가 적용되는 방식이 아닙니다.
 
 #### v0.4.2 — ID 응답 오류
 
@@ -201,7 +201,13 @@ kubectl auth can-i get pods/attach -n radar --as=system:serviceaccount:pipeline:
 
 이 변경은 DAG와 RBAC만으로 기존 v0.4.0 이미지에 적용할 수 있습니다. 기존 Secret 방식으로 되돌리지 않고 태깅 DAG를 pause하면 키 전달도 중단됩니다. Variable 키를 바꾸면 다음 새 태깅 Pod부터 적용되며 이미 실행 중인 Pod에는 소급되지 않습니다.
 
-근거: [모델 명세](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite), [구조화 응답](https://ai.google.dev/gemini-api/docs/structured-output), [프로젝트 단위 한도·태평양 자정 초기화](https://ai.google.dev/gemini-api/docs/rate-limits). 200회는 이 프로젝트의 운영 상한이며 Google이 모든 계정에 보장하는 한도가 아닙니다.
+근거: [모델 명세](https://ai.google.dev/gemini-api/docs/models/gemini-3.1-flash-lite), [구조화 응답](https://ai.google.dev/gemini-api/docs/structured-output), [프로젝트 단위 한도·태평양 자정 초기화](https://ai.google.dev/gemini-api/docs/rate-limits). 500회는 사용자 제공 계정 화면에 맞춘 운영 상한이며 Google이 모든 계정에 보장하는 한도가 아닙니다.
+
+#### v0.4.4 — 확인된 계정 한도 반영 (이미지 배포 대기)
+
+- worker/CLI의 기본 일일 한도와 입력 상한을 200 → 500회로 변경합니다. 실행당 200회, 호출 사이 60초 대기, 제한 재시도, 한국 우선순위, 기존 날짜별 사용량 장부는 그대로 유지합니다.
+- Radar 저장소의 DAG 초안은 v0.4.4·일일 500회를 참조합니다. **Ubuntu에서 v0.4.4 빌드·GHCR push 확인 후** Airflow git-sync 저장소의 DAG를 갱신해야 합니다. 그 전 운영 DAG는 v0.4.3·일일 200회입니다. 웹·수집기 이미지·키 전달 방식은 바꾸지 않습니다.
+- 이미 저장된 호출 수를 초기화하거나 AI Studio의 53회를 장부에 덧붙이지 않습니다. 두 수치에는 중복과 집계 기간 차이가 있을 수 있으며 다른 앱의 사용량은 이 장부가 알 수 없습니다. 429이면 해당 실행은 중단합니다.
 
 ### 결과 검증·적재
 
@@ -231,7 +237,7 @@ uv run --env-file .env python -m radar import-tags detail-request.json detail-re
 
 정의되지 않은 태그, 중복 ID, 잘못된 confidence, 요청과 다른 도메인은 거부합니다. 응답에서 빠진 ID는 완료 처리하지 않고 출력합니다. 상세 결과는 잠정 태그를 삭제하지 않으며 화면에서는 성공한 상세 결과를 우선합니다. confidence는 모델의 자기평가이지 정답 확률이 아닙니다.
 
-프로젝트의 계획값인 하루 200요청을 기준으로 100개 × 200요청은 최대 2만 개/일, 20 URL × 200요청은 최대 4천 개/일입니다. 실제 계정 한도는 실행 전에 확인해야 합니다. 재시도·토큰 한도·다른 작업과 공유하는 API 프로젝트 사용량은 별도입니다. 100만 개의 순차 전수 처리는 이상적 가정에서도 50일 + 250일이며, 초기 서비스는 잠정 결과부터 제공합니다.
+사용자 계정 화면의 하루 500요청을 기준으로 100개 × 500요청은 최대 5만 개/일, 20 URL × 500요청은 최대 1만 개/일입니다. 두 단계가 같은 모델 한도를 공유하므로 동시에 각각 이 최대량을 처리할 수는 없습니다. 재시도·토큰 한도·다른 작업과 공유하는 API 프로젝트 사용량은 별도입니다. 100만 개의 순차 전수 처리는 이상적 가정에서도 20일 + 100일이며, 초기 서비스는 잠정 결과부터 제공합니다. 상세 점검 자동화는 아직 구현 범위 밖입니다.
 
 ## 검증
 

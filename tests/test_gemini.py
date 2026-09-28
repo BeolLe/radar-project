@@ -12,9 +12,9 @@ from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
 from zoneinfo import ZoneInfo
 
-from radar.gemini import GeminiUnavailable, api_payload, normalize, reserve_budget, send, tag_batch, tag_pending
+from radar.gemini import GeminiUnavailable, api_payload, normalize, reserve_budget, save, send, tag_batch, tag_pending
 from radar.tagging import DomainIdMismatch, make_request
-from radar.__main__ import prepare_tags
+from radar.__main__ import main, prepare_tags
 
 
 class GeminiTests(unittest.TestCase):
@@ -328,6 +328,37 @@ class GeminiTests(unittest.TestCase):
             self.assertTrue(reserve_budget(directory, "two", 2))
             self.assertFalse(reserve_budget(directory, "three", 2))
 
+    def test_daily_limit_500_preserves_usage_and_stops_before_501(self):
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+            "RADAR_DATA_DIR": folder, "GEMINI_API_KEY": "test-secret",
+        }), patch("radar.__main__.connect"), patch(
+            "radar.__main__.prepare_tags", return_value=self.request
+        ), patch("radar.__main__.import_tags", return_value={"validated_results": 1}), patch(
+            "radar.gemini.send", return_value=json.dumps(self.response)
+        ) as api:
+            quota = Path(folder) / "raw/gemini/quota"
+            quota.mkdir(parents=True)
+            day = datetime.now(ZoneInfo("America/Los_Angeles")).date().isoformat()
+            save(quota / f"{day}.parquet", {"batches": [f"old-{i}" for i in range(499)]})
+            self.assertEqual(tag_batch("last", 1)["api_calls"], 1)
+            self.assertEqual(tag_batch("next-hour", 1, daily_limit=500),
+                             {"status": "daily_budget_exhausted", "api_calls": 0})
+            api.assert_called_once()
+            for invalid in (0, 501):
+                with self.assertRaisesRegex(ValueError, "daily-limit"):
+                    tag_batch("invalid-limit", daily_limit=invalid)
+
+    def test_cli_daily_limit_defaults_to_500(self):
+        for command, flag, function, expected in (
+            ("tag-batch", "--batch-id", "tag_batch", ("cli", 100, 500)),
+            ("tag-pending", "--run-id", "tag_pending", ("cli", 200, 100, 500)),
+        ):
+            with self.subTest(command=command), patch(
+                "sys.argv", ["radar", command, flag, "cli"]
+            ), patch(f"radar.gemini.{function}", return_value={}) as worker, patch("builtins.print"):
+                main()
+                worker.assert_called_once_with(*expected)
+
     def test_hourly_runs_share_budget_until_pacific_midnight(self):
         for month, reset_hour_utc in ((9, 7), (12, 8)):
             with self.subTest(month=month), tempfile.TemporaryDirectory() as folder, patch(
@@ -397,6 +428,7 @@ class GeminiTests(unittest.TestCase):
             result = tag_pending("test", 200)
             self.assertEqual(result["completed_batches"], 1)
             self.assertEqual(batch.call_count, 2)
+            self.assertEqual(batch.call_args.args[2], 500)
             sleep.assert_called_once_with(60)
         for value in ("../escape", "", "a" * 101):
             with self.assertRaises(ValueError):
@@ -438,9 +470,9 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(dag.call_args.kwargs["default_args"], {"retries": 0})
         kwargs = operator.call_args.kwargs
         self.assertEqual(kwargs["pool"], "radar_collection")
-        self.assertEqual(kwargs["arguments"][-2:], ["--daily-limit", "200"])
+        self.assertEqual(kwargs["arguments"][-2:], ["--daily-limit", "500"])
         self.assertEqual(kwargs["namespace"], "radar")
-        self.assertEqual(kwargs["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.3")
+        self.assertEqual(kwargs["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.4")
         env = kwargs["pod_template_dict"]["spec"]["containers"][0]["env"]
         self.assertFalse(any(e["name"] == "GEMINI_API_KEY" for e in env))
         self.assertNotIn("radar-gemini", str(kwargs))

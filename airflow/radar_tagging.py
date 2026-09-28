@@ -114,11 +114,11 @@ with DAG(
 ) as radar_tagging:
     KubernetesPodOperator(
         task_id="tag", name="radar-tagging", namespace="radar", in_cluster=True,
-        image="ghcr.io/beolle/radar-project-pipeline:v0.4.3",
+        image="ghcr.io/beolle/radar-project-pipeline:v0.4.4",
         cmds=["python", "-u", "-c", BOOTSTRAP],
         arguments=["tag-pending", "--run-id",
                    "{{ dag_run.start_date.strftime('%Y%m%dT%H%M%S%f') }}",
-                   "--max-requests", "{{ params.max_requests }}", "--daily-limit", "200"],
+                   "--max-requests", "{{ params.max_requests }}", "--daily-limit", "500"],
         pool="radar_collection", pool_slots=1, get_logs=True, log_events_on_failure=True,
         do_xcom_push=False, deferrable=False, reattach_on_restart=True,
         callbacks=[AirflowGeminiKey],

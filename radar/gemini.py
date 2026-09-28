@@ -133,7 +133,7 @@ def reserve_budget(directory: Path, batch_id: str, daily_limit: int):
     return True
 
 
-def tag_batch(batch_id: str, limit: int = 100, daily_limit: int = 200,
+def tag_batch(batch_id: str, limit: int = 100, daily_limit: int = 500,
               *, exclude_ids=(), max_attempts: int = 3) -> dict:
     """503/ID mismatches retry in-process; persisted results replay without calls."""
     import pyarrow.parquet as pq
@@ -142,8 +142,8 @@ def tag_batch(batch_id: str, limit: int = 100, daily_limit: int = 200,
         raise ValueError("batch-id must be 1..100 ASCII letters/digits/underscores/hyphens")
     if not 1 <= limit <= 100:
         raise ValueError("limit must be 1..100")
-    if not 1 <= daily_limit <= 200:
-        raise ValueError("daily-limit must be 1..200")
+    if not 1 <= daily_limit <= 500:
+        raise ValueError("daily-limit must be 1..500")
     if not 1 <= max_attempts <= 3:
         raise ValueError("max-attempts must be 1..3")
     directory = Path(os.environ.get("RADAR_DATA_DIR", "data")) / "raw" / "gemini"
@@ -219,7 +219,7 @@ def tag_batch(batch_id: str, limit: int = 100, daily_limit: int = 200,
 
 
 def tag_pending(run_id: str, max_requests: int = 200, limit: int = 100,
-                daily_limit: int = 200) -> dict:
+                daily_limit: int = 500) -> dict:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,89}", run_id):
         raise ValueError("run-id must be 1..90 ASCII letters/digits/underscores/hyphens")
     if not 1 <= max_requests <= 200:

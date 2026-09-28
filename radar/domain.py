@@ -54,7 +54,7 @@ def validate_snapshot(payload: dict) -> tuple[dict, list[dict], dict[str, int]]:
         if (not isinstance(items, list) or type(expected) is not int
                 or expected <= 0 or len(items) != expected):
             raise ValueError("Source count does not match expected_rows")
-        names, ranks = set(), set()
+        names = set()
         for item in items:
             name = domain_name(item["domain"])
             if name in names:
@@ -63,15 +63,12 @@ def validate_snapshot(payload: dict) -> tuple[dict, list[dict], dict[str, int]]:
             value = source["bucket"] if kind == "weekly" else item.get("rank")
             if type(value) is not int or value <= 0:
                 raise ValueError("Rank/bucket must be a positive integer")
-            if kind == "daily":
-                if value > 100 or value in ranks:
-                    raise ValueError("Daily ranks must be distinct and within 1..100")
-                ranks.add(value)
+            # Provider ranks can tie and skip positions; never renumber them.
+            if kind == "daily" and value > 100:
+                raise ValueError("Daily ranks must be within 1..100")
             values[name] = min(values.get(name, value), value)
             rows.append({"source_id": source_id, "domain": name, "value": value})
         sets.append(names)
-        if kind == "daily" and ranks != set(range(1, expected + 1)):
-            raise ValueError("Daily ranks must be contiguous from 1")
     if kind == "weekly" and any(not a <= b for a, b in zip(sets, sets[1:])):
         raise ValueError("Weekly source buckets are not cumulative")
     meta = {"kind": kind, "date": period, "location": location,

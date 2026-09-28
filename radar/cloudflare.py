@@ -123,15 +123,19 @@ def result_rows(token: str, path: str, key: str, params: dict):
     raise ValueError("Cloudflare catalog exceeded the 20-page safety bound")
 
 
-def daily_snapshot(envelope: dict, location: str, requested_date: str | None) -> dict:
+def daily_snapshot(envelope: dict, location: str, requested_date: str | None) -> dict | None:
+    """None means the observed explicit empty response, never an empty snapshot."""
     if envelope.get("success") is not True or envelope.get("errors"):
         raise ValueError("Cloudflare reported an unsuccessful response")
     try:
         result = envelope["result"]
-        actual_date = check_date(result["meta"]["top_0"]["date"])
+        actual_date = result["meta"]["top_0"]["date"]
         rows = result["top_0"]
+        if rows == [] and actual_date is None and result["meta"]["dateRange"] is None:
+            return None
     except (KeyError, TypeError):
         raise ValueError("Missing Cloudflare top_0 rows or dataset date") from None
+    actual_date = check_date(actual_date)
     if requested_date is not None and actual_date != requested_date:
         raise ValueError("Cloudflare returned a different dataset date; refusing fallback")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
@@ -143,7 +147,7 @@ def daily_snapshot(envelope: dict, location: str, requested_date: str | None) ->
     validate_snapshot(payload)
     # Ignore transport/update timestamps; unchanged rankings must remain idempotent.
     # Preserve provider row fields (including categories) in raw Parquet, not AI tags.
-    payload["sources"][0]["rows"] = sorted(rows, key=lambda row: row["rank"])
+    payload["sources"][0]["rows"] = sorted(rows, key=lambda row: (row["rank"], row["domain"]))
     return payload
 
 
@@ -157,6 +161,10 @@ def collect_daily(locations: list[str], day: str | None = None) -> list[dict]:
     payloads = []
     for location in locations:
         payload = daily_snapshot(request_top(token, location, day), location, day)
+        if payload is None:
+            print(json.dumps({"event": "daily_fetch", "date": day, "location": location,
+                              "status": "no_data", "rows": 0}), flush=True)
+            continue
         day = payload["date"]  # Pin all remaining locations to the first dataset's date.
         payloads.append(payload)
     return payloads
@@ -174,8 +182,11 @@ def collect_all_daily(day: str) -> tuple[list[dict], list[dict]]:
         try:
             envelope = request_top(token, location, day)
             payload = daily_snapshot(envelope, location, day)
-            payloads.append(payload)
-            status = {"location": location, "status": "validated", "rows": 100}
+            if payload is None:
+                status = {"location": location, "status": "no_data", "rows": 0}
+            else:
+                payloads.append(payload)
+                status = {"location": location, "status": "validated", "rows": 100}
         except (ValueError, RuntimeError, KeyError, TypeError) as error:
             # No undocumented 400/404/short-list exception is silently called 'unsupported'.
             status = {"location": location, "status": "failed", "error": str(error)}

@@ -258,6 +258,7 @@ def main():
             print(json.dumps({"event": "daily_publish", "date": payload["date"],
                               "location": payload["location"], **ingest(payload)}), flush=True)
         result = {"date": args.date, "locations": len(report), "published": len(payloads),
+                  "no_data": [row for row in report if row["status"] == "no_data"],
                   "failures": [row for row in report if row["status"] == "failed"]}
         if result["failures"]:
             print(json.dumps(result, ensure_ascii=False), flush=True)

@@ -31,6 +31,69 @@ def response(day="2026-01-20"):
 
 
 class CloudflareTests(unittest.TestCase):
+    def test_observed_ties_preserve_ranks_and_stable_raw(self):
+        for location, tied_rank in (("AI", 87), ("BI", 79)):
+            with self.subTest(location=location):
+                envelope = response()
+                envelope["result"]["top_0"][tied_rank]["rank"] = tied_rank
+                payload = cloudflare.daily_snapshot(envelope, location, "2026-01-20")
+                _, _, values = validate_snapshot(payload)
+                self.assertEqual(values[f"domain-{tied_rank + 1}.example"], tied_rank)
+                envelope["result"]["top_0"].reverse()
+                self.assertEqual(digest(payload), digest(cloudflare.daily_snapshot(
+                    envelope, location, "2026-01-20")))
+                with tempfile.TemporaryDirectory(prefix="radar-ties-") as directory, patch.dict(
+                    os.environ, {"RADAR_DATA_DIR": directory}
+                ):
+                    self.assertEqual(read_archive(archive(payload, digest(payload)), digest(payload)), payload)
+
+    def test_observed_no_data_is_not_ingested_or_failed(self):
+        empty = {"success": True, "result": {
+            "meta": {"dateRange": None, "top_0": {"date": None}}, "top_0": []}}
+        self.assertIsNone(cloudflare.daily_snapshot(empty, "AN", "2026-01-20"))
+        with patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": "synthetic-token"}), patch(
+            "radar.cloudflare.result_rows", return_value=[{"alpha2": "AN"}]
+        ), patch("radar.cloudflare.request_top", side_effect=[response(), empty]), patch(
+            "radar.cloudflare.time.sleep"
+        ), patch("radar.__main__.ingest", return_value={"status": "already_published"}) as ingest, patch(
+            "sys.stdout", new_callable=StringIO
+        ) as output, patch("sys.argv", ["radar", "collect-all-daily", "--date", "2026-01-20"]):
+            main()
+        ingest.assert_called_once()
+        self.assertEqual(ingest.call_args.args[0]["location"], "WORLD")
+        summary = json.loads(output.getvalue()[output.getvalue().rfind('\n{') + 1:])
+        self.assertEqual(summary["published"], 1)
+        self.assertEqual(summary["no_data"], [{"location": "AN", "status": "no_data", "rows": 0}])
+        self.assertEqual(summary["failures"], [])
+        # The explicit-location command shares the same empty-result handling.
+        with patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": "synthetic-token"}), patch(
+            "radar.cloudflare.request_top", return_value=empty
+        ), patch("sys.argv", ["radar", "collect-daily", "--locations", "AN", "--date", "2026-01-20"]), patch(
+            "radar.__main__.ingest"
+        ) as ingest, patch("sys.stdout", new_callable=StringIO) as output:
+            main()
+        ingest.assert_not_called()
+        self.assertIn('"status": "no_data"', output.getvalue())
+
+    def test_empty_or_malformed_is_not_automatically_no_data(self):
+        empty = {"success": True, "result": {
+            "meta": {"dateRange": None, "top_0": {"date": None}}, "top_0": []}}
+        for mutate in (
+            lambda e: e.update(success=False),
+            lambda e: e.update(errors=[{"code": 1}]),
+            lambda e: e["result"].pop("top_0"),
+            lambda e: e["result"].update(top_0=None),
+            lambda e: e["result"]["meta"]["top_0"].pop("date"),
+            lambda e: e["result"]["meta"].pop("dateRange"),
+            lambda e: e["result"]["meta"].update(dateRange=[]),
+            lambda e: e["result"]["meta"]["top_0"].update(date="2026-01-20"),
+            lambda e: e["result"].update(top_0=response()["result"]["top_0"]),
+        ):
+            envelope = copy.deepcopy(empty)
+            mutate(envelope)
+            with self.subTest(envelope=envelope), self.assertRaises(ValueError):
+                cloudflare.daily_snapshot(envelope, "AN", "2026-01-20")
+
     def test_weekly_catalog_pins_period_and_rejects_incomplete_latest(self):
         with patch("radar.cloudflare.request_json", return_value=catalog()) as fetch:
             plan = cloudflare.weekly_plan("synthetic-token", "2026-01-20")
@@ -130,7 +193,7 @@ class CloudflareTests(unittest.TestCase):
         duplicate["result"]["top_0"][1]["domain"] = "domain-1.example"
         invalid.append(duplicate)
         rank = response()
-        rank["result"]["top_0"][1]["rank"] = 1
+        rank["result"]["top_0"][1]["rank"] = 101
         invalid.append(rank)
         missing_date = response()
         del missing_date["result"]["meta"]["top_0"]

@@ -93,8 +93,12 @@ class PipelineTests(unittest.TestCase):
         payload = list(demo_snapshots())[-1]
         validate_snapshot(payload)
         payload["sources"][0]["rows"][1]["rank"] = 1
-        with self.assertRaises(ValueError):
-            validate_snapshot(payload)
+        _, _, values = validate_snapshot(payload)
+        self.assertEqual(set(values.values()), {1})
+        for rank in (0, -1, 101, True, 1.5, "1", None):
+            payload["sources"][0]["rows"][1]["rank"] = rank
+            with self.subTest(rank=rank), self.assertRaises(ValueError):
+                validate_snapshot(payload)
 
     def test_domain_boundary(self):
         self.assertEqual(domain_name("WWW.Example.COM."), "www.example.com")

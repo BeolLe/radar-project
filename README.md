@@ -484,7 +484,14 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 - KPO를 실행하는 Airflow worker Pod 1개와 `radar`의 수집 Pod 1개가 추가됩니다. 지역마다 Pod를 만들지 않습니다.
 - DAG는 처음 등록할 때 일시정지 상태입니다. 최초 정상 실행을 확인한 다음 활성화합니다.
 
-전체 지역 목록은 매번 API에서 조회합니다. 사용자 계정의 탐색 결과는 253개 **국가·지역 코드**이며, 253개 모두 순위 자료가 있다는 뜻은 아닙니다. 400/404, 빈 응답, 100행 미만 응답을 임의로 정상 제외하지 않습니다. 검증된 지역은 독립적으로 공개하고 실패 목록은 로그에 남긴 뒤 task를 실패 처리합니다. 재시도 때 동일 자료는 중복 적재하지 않습니다. 첫 실행의 실패 응답을 확인하기 전에는 영구 제외 국가 목록을 만들지 않습니다.
+전체 지역 목록은 매번 API에서 조회합니다. 사용자 계정의 탐색 결과는 253개 **국가·지역 코드**이며, 253개 모두 순위 자료가 있다는 뜻은 아닙니다. 검증된 지역은 독립적으로 공개하고 실제 실패 목록이 있으면 로그를 남긴 뒤 task를 실패 처리합니다. 재시도 때 동일 자료는 중복 적재하지 않습니다. 영구 제외 국가 목록은 만들지 않습니다.
+
+`v0.3.1`은 사용자 제공 2026-09-27 자료 조회 결과(AI의 87위 중복, BI의 79위 중복, AN/AP/AQ/BV/CC의 빈 결과)를 반영합니다.
+
+- 일간 순위는 공급자 원본대로 중복·건너뜀을 허용하며 재번호를 매기지 않습니다. 100행, 도메인 중복 금지, 정수 순위 1..100, 요청 날짜 일치 검증은 유지합니다. 동순위는 도메인명으로 정렬하여 응답 순서가 바뀌어도 해시가 같습니다. 기존 중복 없는 순위의 해시는 바뀌지 않습니다.
+- `success=true`, errors 없음, `top_0=[]`, `meta.top_0.date=null`, `meta.dateRange=null`의 관측된 형태만 `no_data`입니다. 해당 요청의 데이터 없음이지 영구 미지원이라는 뜻이 아닙니다. 다른 빈 응답·필드 누락·100행 미만·HTTP 오류는 계속 실패입니다.
+- `no_data`는 지역별 `daily_fetch` 로그와 전체 수집 최종 요약의 `no_data` 배열에 기록합니다. DB나 Parquet에 빈 스냅샷을 만들지 않으며 기존 관측·변화 신호를 수정하지 않습니다. `collect-daily`도 같은 판정을 사용하고 로그에 기록합니다. 별도의 DB 수집 상태 테이블은 추가하지 않습니다.
+- 최종 `published`는 이번 실행에서 적재 처리를 통과한 지역 수로, `already_published`도 포함합니다. `no_data`만으로 task를 실패시키지 않지만 실제 `failures`가 있으면 종료 코드 1입니다.
 
 주간은 최근 catalog 100개 안에서 **정확히 지정된 주간**을 찾습니다. API 정렬에 기대어 첫 파일을 선택하지 않습니다. 과거 백필·100개 밖의 주차는 지원하지 않고 명시적으로 실패합니다. 각 파일은 이동하는 alias 대신 숫자 dataset ID로 다운로드하며, 제목·설명·기간 등 catalog 메타데이터를 raw에 보존합니다.
 
@@ -493,12 +500,12 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 ```bash
 cd /mnt/data/ronny-project/radar-project
 git pull --ff-only
-docker build -f Dockerfile.pipeline -t ghcr.io/beolle/radar-project-pipeline:v0.3.0 .
+docker build -f Dockerfile.pipeline -t ghcr.io/beolle/radar-project-pipeline:v0.3.1 .
 docker run --rm --read-only --tmpfs /tmp \
   --mount "type=bind,src=$PWD/tests,dst=/tests,readonly" \
-  --entrypoint python ghcr.io/beolle/radar-project-pipeline:v0.3.0 \
+  --entrypoint python ghcr.io/beolle/radar-project-pipeline:v0.3.1 \
   -m unittest discover -s /tests -p test_cloudflare.py -v
-docker push ghcr.io/beolle/radar-project-pipeline:v0.3.0
+docker push ghcr.io/beolle/radar-project-pipeline:v0.3.1
 ```
 
 Argo CD의 `radar` Application을 수동 Sync하여 `k8s/airflow-rbac.json`의 Role/RoleBinding을 반영합니다. 권한은 `radar` namespace의 Pod 생성·조회·로그·정리와 이벤트 조회뿐입니다. Secret 조회, 다른 namespace 권한, ClusterRole은 추가하지 않습니다.
@@ -512,7 +519,7 @@ kubectl -n pipeline exec deployment/airflow-scheduler -c scheduler -- \
 
 #### DAG 배포와 첫 실행
 
-`airflow/radar_collection.py` 한 파일을 기존 **airflow-practice 저장소의 git-sync가 읽는 경로**에 추가·커밋·push합니다. Radar 저장소만 push해도 기존 Airflow가 이 파일을 읽는 것은 아닙니다. 기존 git-sync URL을 Radar 저장소로 바꾸지 않습니다. 실제 설치된 Airflow/Kubernetes provider 버전의 import 검사를 통과해야 합니다.
+새 이미지의 빌드·검사·GHCR push가 성공한 다음에만 `airflow/radar_collection.py` 한 파일을 기존 **airflow-practice 저장소의 git-sync가 읽는 경로**에 추가·커밋·push합니다. Radar 저장소만 push해도 기존 Airflow가 이 파일을 읽는 것은 아닙니다. 기존 git-sync URL을 Radar 저장소로 바꾸지 않습니다. 실제 설치된 Airflow/Kubernetes provider 버전의 import 검사를 통과해야 합니다.
 
 ```bash
 kubectl -n pipeline exec deployment/airflow-scheduler -c scheduler -- \
@@ -527,7 +534,7 @@ UI에서 `radar_daily`, `radar_weekly`와 pool을 확인한 뒤 최초 실행도
 
 ## 개인 서버 배포 전 남은 작업
 
-1. v0.3.0 빌드, Airflow DAG 배포·import·권한 확인, 전체 지역/주간 첫 실수집 검증
+1. v0.3.1 빌드·검사·push 후 Airflow DAG 이미지 갱신, 전체 지역 재수집 및 주간 첫 실수집 검증
 2. Gemini 실제 호출 adapter, 공통 일일 예산·재시도·작업 선점·초기 모집단 관리
 3. 첫 실행 후 스케줄 활성화, 장애 알림, DB 백업과 복구 확인
 4. 실제 수집 데이터의 외부 화면 확인, 장비 기준 부하 검사

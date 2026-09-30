@@ -284,7 +284,7 @@ def main():
         # Validate every requested list before publishing any of this collection.
         payloads = collect_daily(args.locations, args.date)
         result = [{"date": payload["date"], "location": payload["location"],
-                   "rows": 100, **ingest(payload)} for payload in payloads]
+                   "rows": len(payload["sources"][0]["rows"]), **ingest(payload)} for payload in payloads]
     elif args.command == "collect-all-daily":
         from .cloudflare import collect_all_daily
         payloads, report = collect_all_daily(args.date)

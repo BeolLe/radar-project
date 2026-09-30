@@ -31,6 +31,82 @@ def response(day="2026-01-20"):
 
 
 class CloudflareTests(unittest.TestCase):
+    def test_daily_boundary_ties_keep_all_rows_and_raw_identity(self):
+        # Observed MS boundaries: 2026-09-28 has five rank-98 entries (102 rows),
+        # 2026-09-29 has three rank-99 entries (101 rows). Domains are synthetic.
+        for boundary, count in ((98, 102), (99, 101)):
+            with self.subTest(count=count):
+                envelope = response()
+                rows = [{"domain": f"domain-{i}.example", "rank": min(i, boundary)}
+                        for i in range(1, count + 1)]
+                envelope["result"]["top_0"] = rows
+                payload = cloudflare.daily_snapshot(envelope, "MS", "2026-01-20")
+                self.assertEqual(payload["sources"][0]["expected_rows"], count)
+                self.assertEqual(len(validate_snapshot(payload)[2]), count)
+                self.assertEqual(validate_snapshot(payload)[2][f"domain-{count}.example"], boundary)
+                rows.reverse()
+                self.assertEqual(digest(payload), digest(cloudflare.daily_snapshot(
+                    envelope, "MS", "2026-01-20")))
+                with tempfile.TemporaryDirectory(prefix="radar-boundary-") as directory, patch.dict(
+                    os.environ, {"RADAR_DATA_DIR": directory}
+                ):
+                    restored = read_archive(archive(payload, digest(payload)), digest(payload))
+                    self.assertEqual(restored, payload)
+                    self.assertEqual(len(validate_snapshot(restored)[1]), count)
+                damaged = copy.deepcopy(payload)
+                damaged["sources"][0]["rows"].pop()
+                with self.assertRaisesRegex(ValueError, "Source count"):
+                    validate_snapshot(damaged)
+
+    def test_daily_excess_does_not_bypass_validation(self):
+        for mutate in (
+            lambda e: e["result"]["top_0"][0].update(domain="domain-2.example"),
+            lambda e: e["result"]["top_0"][0].update(domain="https://bad.example"),
+            lambda e: e["result"]["top_0"][0].update(rank=101),
+            lambda e: e["result"]["top_0"][0].update(rank=0),
+            lambda e: e["result"]["top_0"][0].update(rank=True),
+            lambda e: e["result"]["top_0"][0].update(rank="1"),
+            lambda e: e["result"]["meta"]["top_0"].update(date="2026-01-19"),
+            lambda e: e.update(success=False),
+        ):
+            envelope = response()
+            envelope["result"]["top_0"].append({"domain": "extra.example", "rank": 100})
+            mutate(envelope)
+            with self.subTest(envelope=envelope), self.assertRaises(ValueError):
+                cloudflare.daily_snapshot(envelope, "MS", "2026-01-20")
+
+    def test_daily_callers_report_actual_row_count(self):
+        envelope = response()
+        envelope["result"]["top_0"].append({"domain": "extra.example", "rank": 100})
+        with patch.dict(os.environ, {"CLOUDFLARE_API_TOKEN": "synthetic-token"}), patch(
+            "radar.cloudflare.result_rows", return_value=[{"alpha2": "MS"}]
+        ), patch("radar.cloudflare.request_top", return_value=envelope), patch(
+            "radar.cloudflare.time.sleep"
+        ), patch("radar.__main__.ingest", return_value={"status": "published"}) as ingest, patch(
+            "sys.stdout", new_callable=StringIO
+        ) as output:
+            with patch("sys.argv", ["radar", "collect-daily", "--locations", "MS", "--date", "2026-01-20"]):
+                main()
+            self.assertEqual(json.loads(output.getvalue())[0]["rows"], 101)
+            output.seek(0)
+            output.truncate()
+            with patch("sys.argv", ["radar", "collect-all-daily", "--date", "2026-01-20"]):
+                main()
+            fetches = [json.loads(line) for line in output.getvalue().splitlines()
+                       if line.startswith('{"event": "daily_fetch"')]
+            self.assertEqual([row["rows"] for row in fetches], [101, 101])
+            self.assertEqual(ingest.call_count, 3)
+            self.assertTrue(all(len(call.args[0]["sources"][0]["rows"]) == 101
+                                for call in ingest.call_args_list))
+
+    def test_daily_100_row_hash_is_unchanged(self):
+        envelope = response()
+        legacy = {"kind": "daily", "date": "2026-01-20", "location": "KR", "sources": [{
+            "id": "cloudflare-popular-2026-01-20-KR", "endpoint": cloudflare.ENDPOINT,
+            "ranking_type": "POPULAR", "expected_rows": 100, "rows": envelope["result"]["top_0"],
+        }]}
+        self.assertEqual(digest(cloudflare.daily_snapshot(envelope, "KR", "2026-01-20")), digest(legacy))
+
     def test_observed_ties_preserve_ranks_and_stable_raw(self):
         for location, tied_rank in (("AI", 87), ("BI", 79)):
             with self.subTest(location=location):

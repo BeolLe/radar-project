@@ -40,7 +40,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(config["pool"], "radar_collection")
             self.assertFalse(config["deferrable"])
             self.assertFalse(config["do_xcom_push"])
-            self.assertEqual(config["image"], "ghcr.io/beolle/radar-project-pipeline:v0.3.2")
+            self.assertEqual(config["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.6")
             spec = config["pod_template_dict"]["spec"]
             self.assertFalse(spec["automountServiceAccountToken"])
             self.assertEqual(spec["imagePullSecrets"], [{"name": "radar-ghcr"}])
@@ -151,7 +151,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual(pod[key], base[key])
         container = pod["containers"][0]
         self.assertEqual(container["args"], ["collect-daily", "--locations", "WORLD", "KR"])
-        self.assertEqual(container["image"], "ghcr.io/beolle/radar-project-pipeline:v0.2.0")
+        self.assertEqual(container["image"], "ghcr.io/beolle/radar-project-pipeline:v0.4.6")
         self.assertEqual(container["env"][-1], {"name": "CLOUDFLARE_API_TOKEN", "valueFrom": {
             "secretKeyRef": {"name": "radar-cloudflare-api", "key": "token"},
         }})

@@ -140,9 +140,13 @@ def daily_snapshot(envelope: dict, location: str, requested_date: str | None) ->
         raise ValueError("Cloudflare returned a different dataset date; refusing fallback")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("Cloudflare top_0 must be an array of objects")
+    # Top 100 is a rank boundary, not an exact count: boundary ties can add rows.
+    # Keep the conservative short-list guard; row count alone cannot prove completeness.
+    if len(rows) < 100:
+        raise ValueError(f"Daily list has fewer than 100 rows: {len(rows)}")
     payload = {"kind": "daily", "date": actual_date, "location": location, "sources": [{
         "id": f"cloudflare-popular-{actual_date}-{location}",
-        "endpoint": ENDPOINT, "ranking_type": "POPULAR", "expected_rows": 100, "rows": rows,
+        "endpoint": ENDPOINT, "ranking_type": "POPULAR", "expected_rows": len(rows), "rows": rows,
     }]}
     validate_snapshot(payload)
     # Ignore transport/update timestamps; unchanged rankings must remain idempotent.
@@ -186,7 +190,8 @@ def collect_all_daily(day: str) -> tuple[list[dict], list[dict]]:
                 status = {"location": location, "status": "no_data", "rows": 0}
             else:
                 payloads.append(payload)
-                status = {"location": location, "status": "validated", "rows": 100}
+                status = {"location": location, "status": "validated",
+                          "rows": len(payload["sources"][0]["rows"])}
         except (ValueError, RuntimeError, KeyError, TypeError) as error:
             # No undocumented 400/404/short-list exception is silently called 'unsupported'.
             status = {"location": location, "status": "failed", "error": str(error)}

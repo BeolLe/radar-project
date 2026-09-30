@@ -112,7 +112,7 @@ uv run python -m radar demo-input > demo-input.json
 uv run --env-file .env python -m radar ingest demo-input.json
 ```
 
-`expected_rows`는 수집기가 확인한 소스 계약입니다. 받은 행 수를 그대로 넣으면 부분 수집 검증이 되지 않습니다. 국가별 자료가 반드시 100행이라고 가정하지 않으며, 실제 소스의 완료 근거가 필요합니다. `date`는 실행일이 아니라 원본 관측 기준일입니다. 주간 파일들이 같은 기간인지 확인하는 책임은 수집 adapter에 있습니다.
+`expected_rows`는 수집 adapter 검증 후 확정한 실제 행 수이며, Parquet 재읽기·정제 시 행 유실을 검사합니다. 이것만으로 원본의 완전성을 증명하지는 않습니다. 일간 adapter는 100행 미만을 보수적으로 거부하고 동순위로 늘어난 100행 이상은 모두 보존합니다. 주간은 bucket 기준보다 적은 행을 거부합니다. 날짜·이름·중복·순위 범위 등의 검증은 별도로 유지합니다. `date`는 실행일이 아니라 원본 관측 기준일입니다. 주간 파일들이 같은 기간인지 확인하는 책임은 수집 adapter에 있습니다.
 
 ### 적재 보장과 의도적인 제한
 
@@ -498,7 +498,7 @@ curl -sS --max-time 15 -o /dev/null -w 'Dashboard HTTP %{http_code}\n' https://r
 `collect-daily`는 공식 `/radar/ranking/top`의 `POPULAR` 데이터를 가져와 기존 raw Parquet → stage → core/mart 경로로 적재합니다. 첫 Job은 `WORLD`, `KR` 두 목록(관측 200행, 서로 겹치는 도메인은 core.domain에서 통합)을 대상으로 하며 주간 100만 도메인 적재가 아닙니다. 신규 의존성 없이 Python 표준 HTTP 라이브러리를 사용합니다.
 
 - 실행일을 관측일로 쓰지 않고 `result.meta.top_0.date`를 사용합니다. 첫 응답의 날짜로 나머지 국가 요청을 고정하고 다른 날짜로 대체된 응답은 거부합니다. `--date YYYY-MM-DD`로 정확한 원본 날짜를 지정할 수도 있습니다.
-- 첫 구현은 각 목록이 정확히 100행이고 순위가 1~100, 도메인이 중복되지 않는 경우만 적재합니다. 실제로 100개 미만을 제공하는 국가도 있을 수 있지만 완료 근거를 확인하기 전에는 받은 행 수로 기준을 낮추지 않습니다.
+- 일간 목록은 100행 이상이고 정수 순위가 1~100, 도메인이 중복되지 않는 경우 모두 적재합니다. 동순위 초과분을 자르거나 재번호를 매기지 않습니다. 실제로 100개 미만을 제공하는 국가도 있을 수 있지만 완료 근거를 확인하기 전에는 기준을 낮추지 않습니다.
 - 요청한 목록을 모두 받아 검증하기 전에는 DB 적재를 시작하지 않습니다. HTTP 인증 오류·잘못된 응답은 중단합니다. 429/일부 5xx/연결 오류는 최대 3회 시도하며 30초를 넘는 Retry-After는 기다리는 대신 중단합니다. 자동 무한 재시도나 날짜 fallback은 없습니다.
 - raw에는 제공된 각 순위 행의 추가 필드(Cloudflare categories 포함)를 보존합니다. 원본 HTTP 봉투 전체를 복제하지는 않습니다. 응답의 변경 시각/전송 메타데이터는 해시에 넣지 않아 같은 날짜·내용의 재수집은 `already_published`로 처리할 수 있습니다. 기준일·location·endpoint·POPULAR 종류는 보존합니다. Cloudflare categories를 Gemini 태그로 기록하지 않습니다.
 - **DB 트랜잭션은 국가/목록별입니다.** 적재 도중 DB 오류가 나면 앞 목록은 완료됐을 수 있습니다. 상태를 확인하고 같은 날짜로 재실행하면 동일 내용은 중복 적재하지 않습니다. 이미 공개한 동일 날짜의 내용이 바뀌면 덮어쓰지 않고 중단합니다. 과거 backfill은 기존 구현처럼 시간 역순 삽입을 허용하지 않습니다.
@@ -585,7 +585,7 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 
 `v0.3.1`은 사용자 제공 2026-09-27 자료 조회 결과(AI의 87위 중복, BI의 79위 중복, AN/AP/AQ/BV/CC의 빈 결과)를 반영합니다.
 
-- 일간 순위는 공급자 원본대로 중복·건너뜀을 허용하며 재번호를 매기지 않습니다. 100행, 도메인 중복 금지, 정수 순위 1..100, 요청 날짜 일치 검증은 유지합니다. 동순위는 도메인명으로 정렬하여 응답 순서가 바뀌어도 해시가 같습니다. 기존 중복 없는 순위의 해시는 바뀌지 않습니다.
+- 일간 순위는 공급자 원본대로 중복·건너뜀을 허용하며 재번호를 매기지 않습니다. 당시에는 정확히 100행 제한이 남아 있었으며, 아래 v0.4.6에서 경계 동순위 초과 행도 허용하도록 수정했습니다. 도메인 중복 금지, 정수 순위 1..100, 요청 날짜 일치 검증은 유지합니다. 동순위는 도메인명으로 정렬하여 응답 순서가 바뀌어도 해시가 같습니다.
 - `success=true`, errors 없음, `top_0=[]`, `meta.top_0.date=null`, `meta.dateRange=null`의 관측된 형태만 `no_data`입니다. 해당 요청의 데이터 없음이지 영구 미지원이라는 뜻이 아닙니다. 다른 빈 응답·필드 누락·100행 미만·HTTP 오류는 계속 실패입니다.
 - `no_data`는 지역별 `daily_fetch` 로그와 전체 수집 최종 요약의 `no_data` 배열에 기록합니다. DB나 Parquet에 빈 스냅샷을 만들지 않으며 기존 관측·변화 신호를 수정하지 않습니다. `collect-daily`도 같은 판정을 사용하고 로그에 기록합니다. 별도의 DB 수집 상태 테이블은 추가하지 않습니다.
 - 최종 `published`는 이번 실행에서 적재 처리를 통과한 지역 수로, `already_published`도 포함합니다. `no_data`만으로 task를 실패시키지 않지만 실제 `failures`가 있으면 종료 코드 1입니다.
@@ -601,17 +601,24 @@ raw는 `/data/raw`에 기록되어 Pod가 종료돼도 PVC에 남습니다. 웹�
 - `weekly_fetched` 로그에 구간 기준값·실제 행 수·차이를 표시합니다. 이 로그는 다운로드/파싱 완료이며 DB 적재 성공은 마지막 `published` 또는 `already_published`로 확인합니다. 동일 도메인의 여러 구간 관측은 기존대로 가장 작은 구간에 통합됩니다.
 - DB 스키마·웹·태깅 기능은 변경하지 않습니다. 로컬 회귀 검사는 합성 자료 기준이고, 실제 PostgreSQL 적재·새 이미지 실행은 서버 확인이 별도로 필요합니다. 이미지 push 완료 후에만 Airflow 저장소의 DAG를 갱신합니다.
 
+`v0.4.6` 일간 경계 동순위 수정:
+
+- MS 재조회에서 2026-09-28은 공동 98위 5개를 포함한 102행, 2026-09-29는 공동 99위 3개를 포함한 101행이었으며 중복 도메인은 없었습니다. v0.3.1은 순위 중복만 허용했고 v0.3.2의 초과 행 보존은 주간에만 적용되어 일간 검사가 누락됐습니다.
+- 일간 공통 adapter에서 100행 미만 보호 규칙을 유지하되 초과 행은 전부 raw → stage → core에 보존합니다. `expected_rows`와 수집 로그는 실제 행 수를 기록합니다. 최소 행 수가 원본 완전성을 보증하지는 않습니다. 명시적 `no_data`, 날짜·순위·중복 검사는 그대로입니다.
+- 기존 100행 payload의 해시는 유지됩니다. 101/102행 보존·Parquet 왕복·개별/전체 수집·잘못된 날짜/순위/중복 거부를 회귀 검사합니다. DB 스키마, 웹, Gemini 태깅 DAG는 변경하지 않습니다.
+- 아래 이미지를 먼저 빌드·검사·push한 다음 `airflow/radar_collection.py`를 Airflow 저장소에 배포합니다. 기존 실행 중 Pod는 자동으로 바뀌지 않습니다. 실패 날짜 복구는 해당 지역의 최신 DB 날짜를 먼저 확인하고 오래된 날짜부터 진행합니다. 과거 날짜 강제 적재나 기존 스냅샷 삭제는 하지 않습니다.
+
 #### 이미지와 권한 준비 — Ubuntu
 
 ```bash
 cd /mnt/data/ronny-project/radar-project
 git pull --ff-only
-docker build -f Dockerfile.pipeline -t ghcr.io/beolle/radar-project-pipeline:v0.3.2 .
+docker build -f Dockerfile.pipeline -t ghcr.io/beolle/radar-project-pipeline:v0.4.6 .
 docker run --rm --read-only --tmpfs /tmp \
   --mount "type=bind,src=$PWD/tests,dst=/tests,readonly" \
-  --entrypoint python ghcr.io/beolle/radar-project-pipeline:v0.3.2 \
+  --entrypoint python ghcr.io/beolle/radar-project-pipeline:v0.4.6 \
   -m unittest discover -s /tests -p test_cloudflare.py -v
-docker push ghcr.io/beolle/radar-project-pipeline:v0.3.2
+docker push ghcr.io/beolle/radar-project-pipeline:v0.4.6
 ```
 
 Argo CD의 `radar` Application을 수동 Sync하여 `k8s/airflow-rbac.json`의 Role/RoleBinding을 반영합니다. 권한은 `radar` namespace의 Pod 생성·조회·로그·정리와 이벤트 조회뿐입니다. Secret 조회, 다른 namespace 권한, ClusterRole은 추가하지 않습니다.

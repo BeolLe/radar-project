@@ -18,7 +18,7 @@
         },
         "containers": [{
           "name": "pipeline",
-          "image": "ghcr.io/beolle/radar-project-pipeline:v0.2.0",
+          "image": "ghcr.io/beolle/radar-project-pipeline:v0.4.6",
           "imagePullPolicy": "IfNotPresent",
           "args": ["collect-daily", "--locations", "WORLD", "KR"],
           "env": [{"name": "DATABASE_URL", "valueFrom": {"secretKeyRef": {

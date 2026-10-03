@@ -59,9 +59,11 @@ def archive(payload: dict, batch: str) -> Path:
     return target
 
 
-def ingest(payload: dict) -> dict:
+def ingest(payload: dict, *, backfill: bool = False) -> dict:
     from psycopg.types.json import Jsonb
     validate_snapshot(payload)
+    if backfill and payload["kind"] != "daily":
+        raise ValueError("Backfill is supported only for daily snapshots")
     batch = digest(payload)
     raw = archive(payload, batch)
     # Stage is reconstructed from raw Parquet, not from an in-memory alternate path.
@@ -79,8 +81,9 @@ def ingest(payload: dict) -> dict:
             return {"snapshot_id": existing[0], "status": "already_published"}
         latest = conn.execute("SELECT max(period_date) FROM core.snapshot WHERE kind=%s AND location=%s",
                               (meta["kind"], meta["location"])).fetchone()[0]
-        if latest and meta["date"] < latest:
-            raise ValueError("Load periods chronologically; historical mart rebuild is not implemented")
+        historical = latest is not None and meta["date"] < latest
+        if historical and not backfill:
+            raise ValueError("Load periods chronologically; use backfill-daily for a missing daily period")
         # Stage commits first. A failed publish retains its raw file and staging rows.
         with conn.transaction():
             conn.execute("DELETE FROM stage.observation WHERE batch_hash=%s", (batch,))
@@ -99,13 +102,26 @@ def ingest(payload: dict) -> dict:
             conn.execute("INSERT INTO core.observation SELECT %s,d.id,min(s.value) "
                          "FROM stage.observation s JOIN core.domain d ON d.name=s.domain "
                          "WHERE s.batch_hash=%s GROUP BY d.id", (snapshot_id, batch))
-            previous = conn.execute("SELECT id FROM core.snapshot WHERE kind=%s AND location=%s "
-                                    "AND period_date=%s",
-                                    (meta["kind"], meta["location"], previous_date(meta))).fetchone()
-            if previous:
-                build_signals(conn, snapshot_id, previous[0], meta)
+            targets = [(snapshot_id, meta["date"])]
+            if historical:
+                # Reentry depends on all earlier observations, not just yesterday.
+                # Rebuild every later snapshot in this stream, in chronological order.
+                targets = conn.execute("SELECT id,period_date FROM core.snapshot "
+                                       "WHERE kind=%s AND location=%s AND period_date>=%s "
+                                       "ORDER BY period_date",
+                                       (meta["kind"], meta["location"], meta["date"])).fetchall()
+            for target_id, target_date in targets:
+                target_meta = {**meta, "date": target_date}
+                if historical:
+                    conn.execute("DELETE FROM mart.domain_signal WHERE snapshot_id=%s", (target_id,))
+                previous = conn.execute("SELECT id FROM core.snapshot WHERE kind=%s AND location=%s "
+                                        "AND period_date=%s", (meta["kind"], meta["location"],
+                                                              previous_date(target_meta))).fetchone()
+                if previous:
+                    build_signals(conn, target_id, previous[0], target_meta)
             conn.execute("DELETE FROM stage.observation WHERE batch_hash=%s", (batch,))
-    return {"snapshot_id": snapshot_id, "status": "published", "raw": str(raw)}
+    return {"snapshot_id": snapshot_id, "status": "published", "raw": str(raw),
+            **({"signals_rebuilt_snapshots": len(targets)} if backfill else {})}
 
 
 def build_signals(conn, current: int, previous: int, meta: dict):
@@ -249,6 +265,9 @@ def main():
     collect = commands.add_parser("collect-daily", help="Fetch and ingest complete Cloudflare POPULAR top-100 lists")
     collect.add_argument("--locations", nargs="+", default=["WORLD", "KR"])
     collect.add_argument("--date", help="Exact dataset date YYYY-MM-DD; default: latest returned by API")
+    backfill = commands.add_parser("backfill-daily", help="Fill one missing daily snapshot and rebuild this location's later signals")
+    backfill.add_argument("--location", required=True, help="One WORLD/uppercase alpha-2 location")
+    backfill.add_argument("--date", required=True, help="Exact missing dataset date YYYY-MM-DD")
     all_daily = commands.add_parser("collect-all-daily", help="Discover all locations and publish independently validated lists")
     all_daily.add_argument("--date", required=True, help="Exact dataset date YYYY-MM-DD")
     weekly = commands.add_parser("collect-weekly", help="Collect all twelve global buckets for the latest Monday ending on/before as-of")
@@ -285,6 +304,14 @@ def main():
         payloads = collect_daily(args.locations, args.date)
         result = [{"date": payload["date"], "location": payload["location"],
                    "rows": len(payload["sources"][0]["rows"]), **ingest(payload)} for payload in payloads]
+    elif args.command == "backfill-daily":
+        from .cloudflare import collect_daily
+        payloads = collect_daily([args.location], args.date)
+        if not payloads:
+            raise ValueError("No data returned for the requested backfill; nothing was repaired")
+        payload = payloads[0]
+        result = {"date": payload["date"], "location": payload["location"],
+                  "rows": len(payload["sources"][0]["rows"]), **ingest(payload, backfill=True)}
     elif args.command == "collect-all-daily":
         from .cloudflare import collect_all_daily
         payloads, report = collect_all_daily(args.date)

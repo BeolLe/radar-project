@@ -94,14 +94,14 @@ class PostgresTests(unittest.TestCase):
             self.assertLess(ordered.index("run.app"), ordered.index("api.example.com"))
             self.assertLess(ordered.index("api.example.com"), ordered.index("web"))
             # Old KR rank 1 must not displace current KR, nor may JP rank 1 reorder KR.
-            for location, values in (("KR", [("ws", 1), ("web", 2)]),
-                                     ("JP", [("web", 1), ("api.example.com", 2)])):
+            for location, values in (("KR", [("ws.example", 1), ("web.example", 2)]),
+                                     ("JP", [("web.example", 1), ("api.example.com", 2)])):
                 ingest({"kind": "daily", "date": "2026-01-28", "location": location,
                         "sources": [{"id": "latest-" + location, "expected_rows": 2,
                                      "rows": [{"domain": name, "rank": rank} for name, rank in values]}]})
             pending = prepare_tags("preliminary", 100)
             ordered = [d["domain"] for d in pending["domains"]]
-            self.assertEqual(ordered[:3], ["ws", "web", "api.example.com"])
+            self.assertEqual(ordered[:3], ["ws.example", "web.example", "api.example.com"])
             self.assertGreater(ordered.index("run.app"), 2)
             excluded = pending["domains"][0]["domain_id"]
             self.assertNotIn(excluded, [d["domain_id"] for d in
